@@ -1,0 +1,41 @@
+# Handoffarr example configuration.
+#
+# Copy this file to config/config.yaml and fill in your real values LOCALLY.
+# config/config.yaml is git-ignored on purpose — never commit real secrets.
+
+app:
+  poll_interval_seconds: 15
+  lookback_minutes: 120
+  stale_peer_minutes: 10
+
+services:
+  seerr:
+    enabled: true
+    base_url: "http://jellyseerr:5055"
+    api_key: "PASTE_SEERR_API_KEY_HERE"
+    request_endpoint: "/api/v1/request"
+
+  radarr:
+    enabled: true
+    base_url: "http://radarr:7878"
+    api_key: "PASTE_RADARR_API_KEY_HERE"
+    history_endpoint: "/api/v3/history"
+
+  qbittorrent:
+    enabled: true
+    base_url: "http://qbittorrent:8080"
+    username: "admin"
+    password: "PASTE_QBITTORRENT_PASSWORD_HERE"
+    torrents_endpoint: "/api/v2/torrents/info"
+    trackers_endpoint: "/api/v2/torrents/trackers"
+
+thresholds:
+  low_reported_seeds: 5
+  healthy_reported_seeds: 20
+  actual_peers_zero_minutes: 5
+
+matching:
+  prefer_torrent_hash: true
+  fallback_to_download_id: true
+  fallback_to_normalized_title: true
+  title_time_window_minutes: 60

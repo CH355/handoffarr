@@ -1,0 +1,10 @@
+services:
+  handoffarr:
+    build: .
+    container_name: handoffarr
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    restart: unless-stopped

@@ -1,0 +1,29 @@
+# Local config with real secrets — never commit
+config/config.yaml
+
+# Runtime data and logs
+data/
+logs/
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+
+# Environment files
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

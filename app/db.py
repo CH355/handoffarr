@@ -1,0 +1,175 @@
+"""SQLite storage for Handoffarr.
+
+Stores raw collector events and correlated handoff traces. The database lives at
+/data/handoffarr.sqlite3 by default and is created on first use.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from typing import Any
+
+logger = logging.getLogger("handoffarr.db")
+
+DB_PATH = os.environ.get("HANDOFFARR_DB", "/data/handoffarr.sqlite3")
+
+_lock = threading.Lock()
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _connect() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    """Create tables if they do not exist."""
+    with _lock, _connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS raw_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT,
+                event_type TEXT,
+                external_id TEXT,
+                title TEXT,
+                torrent_hash TEXT,
+                download_id TEXT,
+                payload_json TEXT,
+                observed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS handoff_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                seerr_request_id TEXT,
+                radarr_history_id TEXT,
+                torrent_hash TEXT,
+                download_id TEXT,
+                selected_release TEXT,
+                reported_seeds INTEGER,
+                reported_indexer TEXT,
+                qbittorrent_state TEXT,
+                actual_seeds INTEGER,
+                actual_peers INTEGER,
+                diagnosis TEXT,
+                updated_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_raw_events_source
+                ON raw_events (source, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_raw_events_hash
+                ON raw_events (torrent_hash);
+            """
+        )
+    logger.info("Database initialized at %s", DB_PATH)
+
+
+def insert_raw_event(
+    *,
+    source: str,
+    event_type: str,
+    external_id: str | None,
+    title: str | None,
+    torrent_hash: str | None,
+    download_id: str | None,
+    payload: Any,
+    observed_at: str | None = None,
+) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO raw_events
+                (source, event_type, external_id, title, torrent_hash,
+                 download_id, payload_json, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source,
+                event_type,
+                str(external_id) if external_id is not None else None,
+                title,
+                torrent_hash,
+                str(download_id) if download_id is not None else None,
+                json.dumps(payload, default=str),
+                observed_at or _utcnow(),
+            ),
+        )
+
+
+def recent_events(source: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        if source:
+            rows = conn.execute(
+                "SELECT * FROM raw_events WHERE source = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (source, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM raw_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def events_for_source_since(source: str, since_iso: str) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM raw_events WHERE source = ? AND observed_at >= ? "
+            "ORDER BY id DESC",
+            (source, since_iso),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def replace_traces(traces: list[dict[str, Any]]) -> None:
+    """Replace the full trace snapshot. Traces are derived state, so we rebuild
+    them on each correlation pass rather than trying to upsert."""
+    now = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM handoff_traces")
+        for t in traces:
+            conn.execute(
+                """
+                INSERT INTO handoff_traces
+                    (title, seerr_request_id, radarr_history_id, torrent_hash,
+                     download_id, selected_release, reported_seeds,
+                     reported_indexer, qbittorrent_state, actual_seeds,
+                     actual_peers, diagnosis, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    t.get("title"),
+                    t.get("seerr_request_id"),
+                    t.get("radarr_history_id"),
+                    t.get("torrent_hash"),
+                    t.get("download_id"),
+                    t.get("selected_release"),
+                    t.get("reported_seeds"),
+                    t.get("reported_indexer"),
+                    t.get("qbittorrent_state"),
+                    t.get("actual_seeds"),
+                    t.get("actual_peers"),
+                    t.get("diagnosis"),
+                    now,
+                ),
+            )
+
+
+def all_traces() -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM handoff_traces ORDER BY updated_at DESC, id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]

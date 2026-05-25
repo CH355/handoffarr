@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Handoffarr</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; background: #14161a; color: #e6e8eb;
+    }
+    header {
+      padding: 18px 24px; border-bottom: 1px solid #2a2e35;
+      display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    }
+    h1 { font-size: 20px; margin: 0; }
+    .tagline { color: #9aa0a6; font-size: 13px; }
+    .actions { margin-left: auto; }
+    button {
+      background: #2d6cdf; color: #fff; border: 0; padding: 8px 14px;
+      border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    button:hover { background: #3a78ec; }
+    main { padding: 24px; }
+    .notice {
+      background: #3a2f17; border: 1px solid #6b5418; color: #f1d99a;
+      padding: 16px 18px; border-radius: 8px; max-width: 760px;
+    }
+    .notice code { background: #1f2937; padding: 1px 5px; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td {
+      text-align: left; padding: 8px 10px; border-bottom: 1px solid #262a31;
+      vertical-align: top;
+    }
+    th { color: #9aa0a6; font-weight: 600; position: sticky; top: 0;
+         background: #14161a; }
+    tr:hover td { background: #1b1e24; }
+    .muted { color: #6b7280; }
+    .diag {
+      font-size: 12px; padding: 2px 8px; border-radius: 12px;
+      display: inline-block; white-space: nowrap;
+    }
+    .diag-ok { background: #11331f; color: #7ee2a8; }
+    .diag-warn { background: #3a2f17; color: #f1d99a; }
+    .diag-bad { background: #3a1b1b; color: #f1a3a3; }
+    .empty { color: #9aa0a6; padding: 32px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Handoffarr</h1>
+    <span class="tagline">See who passed the bad torrent.</span>
+    <div class="actions">
+      <button onclick="pollNow()">Poll now</button>
+    </div>
+  </header>
+
+  <main>
+    {% if not config_present %}
+      <div class="notice">
+        <strong>Configuration not found.</strong>
+        <p>
+          Handoffarr could not find a config file at
+          <code>{{ config_path }}</code>.
+        </p>
+        <p>
+          Copy <code>config.example.yaml</code> to
+          <code>config/config.yaml</code>, add your API keys locally, then
+          restart the container. See the README for details.
+        </p>
+      </div>
+    {% elif traces|length == 0 %}
+      <div class="empty">
+        No handoff traces yet. The poller runs on an interval — give it a moment,
+        or click <em>Poll now</em>.
+      </div>
+    {% else %}
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Seerr status</th>
+            <th>Radarr selected release</th>
+            <th>Reported seeds</th>
+            <th>Reported indexer</th>
+            <th>qBittorrent state</th>
+            <th>Actual seeds</th>
+            <th>Actual peers</th>
+            <th>Diagnosis</th>
+            <th>Last updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in traces %}
+            {% set d = t.diagnosis or "" %}
+            {% if "Healthy" in d %}
+              {% set cls = "diag-ok" %}
+            {% elif "Likely bad" in d or "did not receive" in d %}
+              {% set cls = "diag-bad" %}
+            {% else %}
+              {% set cls = "diag-warn" %}
+            {% endif %}
+            <tr>
+              <td>{{ t.title or "—" }}</td>
+              <td>{% if t.seerr_request_id %}#{{ t.seerr_request_id }}{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>{{ t.selected_release or "—" }}</td>
+              <td>{{ t.reported_seeds if t.reported_seeds is not none else "—" }}</td>
+              <td>{{ t.reported_indexer or "—" }}</td>
+              <td>{{ t.qbittorrent_state or "—" }}</td>
+              <td>{{ t.actual_seeds if t.actual_seeds is not none else "—" }}</td>
+              <td>{{ t.actual_peers if t.actual_peers is not none else "—" }}</td>
+              <td><span class="diag {{ cls }}">{{ d or "—" }}</span></td>
+              <td class="muted">{{ t.updated_at or "—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </main>
+
+  <script>
+    async function pollNow() {
+      const btn = document.querySelector('.actions button');
+      btn.disabled = true; btn.textContent = 'Polling…';
+      try {
+        await fetch('/api/poll-now', { method: 'POST' });
+      } catch (e) { /* ignore */ }
+      location.reload();
+    }
+  </script>
+</body>
+</html>
