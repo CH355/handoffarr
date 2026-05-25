@@ -44,6 +44,19 @@
     .diag-ok { background: #11331f; color: #7ee2a8; }
     .diag-warn { background: #3a2f17; color: #f1d99a; }
     .diag-bad { background: #3a1b1b; color: #f1a3a3; }
+    .conf-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 6px; vertical-align: middle;
+    }
+    .conf-high { background: #7ee2a8; }
+    .conf-med { background: #f1d99a; }
+    .conf-low { background: #f1a3a3; }
+    .conf-none { background: #6b7280; }
+    .src { font-size: 12px; }
+    .state-class {
+      font-size: 11px; color: #9aa0a6; text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
     .empty { color: #9aa0a6; padding: 32px 0; }
     .queue-card {
       background: #181b21; border: 1px solid #2a2e35; border-radius: 10px;
@@ -116,11 +129,13 @@
         <thead>
           <tr>
             <th>Title</th>
+            <th>Match</th>
             <th>Seerr status</th>
             <th>Radarr selected release</th>
             <th>Reported seeds</th>
             <th>Reported indexer</th>
             <th>qBittorrent state</th>
+            <th>State class</th>
             <th>Actual seeds</th>
             <th>Actual peers</th>
             <th>Diagnosis</th>
@@ -137,13 +152,28 @@
             {% else %}
               {% set cls = "diag-warn" %}
             {% endif %}
+            {% set conf = t.match_confidence if t.match_confidence is not none else 0 %}
+            {% if conf >= 0.8 %}
+              {% set conf_cls = "conf-high" %}
+            {% elif conf >= 0.5 %}
+              {% set conf_cls = "conf-med" %}
+            {% elif conf > 0 %}
+              {% set conf_cls = "conf-low" %}
+            {% else %}
+              {% set conf_cls = "conf-none" %}
+            {% endif %}
             <tr>
               <td>{{ t.title or "—" }}</td>
+              <td>
+                <span class="conf-dot {{ conf_cls }}" title="confidence {{ '%.2f'|format(conf) }}"></span>
+                <span class="src">{{ t.match_source or "—" }}</span>
+              </td>
               <td>{% if t.seerr_request_id %}#{{ t.seerr_request_id }}{% else %}<span class="muted">—</span>{% endif %}</td>
               <td>{{ t.selected_release or "—" }}</td>
               <td>{{ t.reported_seeds if t.reported_seeds is not none else "—" }}</td>
               <td>{{ t.reported_indexer or "—" }}</td>
               <td>{{ t.qbittorrent_state or "—" }}</td>
+              <td>{% if t.state_classification %}<span class="state-class">{{ t.state_classification }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
               <td>{{ t.actual_seeds if t.actual_seeds is not none else "—" }}</td>
               <td>{{ t.actual_peers if t.actual_peers is not none else "—" }}</td>
               <td><span class="diag {{ cls }}">{{ d or "—" }}</span></td>

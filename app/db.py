@@ -63,7 +63,12 @@ def init_db() -> None:
                 actual_seeds INTEGER,
                 actual_peers INTEGER,
                 diagnosis TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                match_source TEXT,
+                match_confidence REAL,
+                match_reasons TEXT,
+                normalized_title TEXT,
+                state_classification TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
@@ -72,7 +77,33 @@ def init_db() -> None:
                 ON raw_events (torrent_hash);
             """
         )
+        _migrate_handoff_traces(conn)
     logger.info("Database initialized at %s", DB_PATH)
+
+
+# Correlation-diagnostic columns added after the original schema shipped. Stored
+# as (column, SQLite type) so we can ALTER existing databases in place rather
+# than dropping the table and losing trace history.
+_TRACE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("match_source", "TEXT"),
+    ("match_confidence", "REAL"),
+    ("match_reasons", "TEXT"),
+    ("normalized_title", "TEXT"),
+    ("state_classification", "TEXT"),
+)
+
+
+def _migrate_handoff_traces(conn: sqlite3.Connection) -> None:
+    """Add any missing diagnostic columns to an existing handoff_traces table.
+
+    CREATE TABLE above already includes these for fresh databases; this brings
+    pre-existing databases up to the same shape without a migrations framework.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(handoff_traces)")}
+    for name, col_type in _TRACE_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE handoff_traces ADD COLUMN {name} {col_type}")
+            logger.info("Migrated handoff_traces: added column %s", name)
 
 
 def insert_raw_event(
@@ -140,14 +171,17 @@ def replace_traces(traces: list[dict[str, Any]]) -> None:
     with _lock, _connect() as conn:
         conn.execute("DELETE FROM handoff_traces")
         for t in traces:
+            reasons = t.get("match_reasons")
             conn.execute(
                 """
                 INSERT INTO handoff_traces
                     (title, seerr_request_id, radarr_history_id, torrent_hash,
                      download_id, selected_release, reported_seeds,
                      reported_indexer, qbittorrent_state, actual_seeds,
-                     actual_peers, diagnosis, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     actual_peers, diagnosis, updated_at, match_source,
+                     match_confidence, match_reasons, normalized_title,
+                     state_classification)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     t.get("title"),
@@ -163,6 +197,11 @@ def replace_traces(traces: list[dict[str, Any]]) -> None:
                     t.get("actual_peers"),
                     t.get("diagnosis"),
                     now,
+                    t.get("match_source"),
+                    t.get("match_confidence"),
+                    json.dumps(reasons) if reasons is not None else None,
+                    t.get("normalized_title"),
+                    t.get("state_classification"),
                 ),
             )
 
@@ -172,4 +211,18 @@ def all_traces() -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT * FROM handoff_traces ORDER BY updated_at DESC, id DESC"
         ).fetchall()
-    return [dict(r) for r in rows]
+    traces: list[dict[str, Any]] = []
+    for r in rows:
+        trace = dict(r)
+        # match_reasons is stored as a JSON array; decode it back to a list so
+        # API consumers and templates see structured data, not a JSON string.
+        raw_reasons = trace.get("match_reasons")
+        if raw_reasons:
+            try:
+                trace["match_reasons"] = json.loads(raw_reasons)
+            except (TypeError, ValueError):
+                trace["match_reasons"] = [raw_reasons]
+        else:
+            trace["match_reasons"] = []
+        traces.append(trace)
+    return traces
