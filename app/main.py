@@ -20,7 +20,7 @@ from starlette.requests import Request
 from . import db
 from .collectors import qbittorrent, radarr, seerr
 from .config import Config, load_config
-from .correlation import run_correlation
+from .correlation import correlation_report, run_correlation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -142,3 +142,45 @@ async def api_poll_now() -> JSONResponse:
     async with _poll_lock:
         results = await asyncio.to_thread(poll_once)
     return JSONResponse({"status": "ok", "results": results})
+
+
+# --- Debug inspection endpoints (read-only) -------------------------------
+# These hit the live service APIs (or recompute correlation from stored events)
+# to expose raw payloads, normalized objects, extraction diagnostics and
+# missing-field warnings. Intended for diagnosing real-world payload mismatches.
+
+
+@app.get("/api/debug/radarr")
+async def debug_radarr() -> JSONResponse:
+    return JSONResponse(await asyncio.to_thread(radarr.inspect, get_config()))
+
+
+@app.get("/api/debug/qbit")
+async def debug_qbit() -> JSONResponse:
+    return JSONResponse(await asyncio.to_thread(qbittorrent.inspect, get_config()))
+
+
+@app.get("/api/debug/seerr")
+async def debug_seerr() -> JSONResponse:
+    return JSONResponse(await asyncio.to_thread(seerr.inspect, get_config()))
+
+
+@app.get("/api/debug/states")
+async def debug_states() -> JSONResponse:
+    return JSONResponse(
+        await asyncio.to_thread(qbittorrent.states_report, get_config())
+    )
+
+
+@app.get("/api/debug/correlation")
+async def debug_correlation() -> JSONResponse:
+    config = get_config()
+    if not config.is_present:
+        return JSONResponse({"error": "config not present"}, status_code=409)
+    matches = await asyncio.to_thread(correlation_report, config)
+    return JSONResponse({"matches": matches})
+
+
+@app.get("/api/debug/radarr-fields")
+async def debug_radarr_fields() -> JSONResponse:
+    return JSONResponse(await asyncio.to_thread(radarr.discover_fields, get_config()))

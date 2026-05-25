@@ -85,11 +85,26 @@ and database files out of git — keep it that way.
 | `/api/events`     | GET    | Recent raw events (`?source=`, `?limit=`)|
 | `/api/poll-now`   | POST   | Trigger an immediate poll + correlation  |
 
+### Debug inspection routes (read-only)
+
+These hit the live service APIs (or recompute correlation from stored events) to
+help diagnose real-world payload mismatches. Each returns JSON.
+
+| Route                      | Purpose                                                                 |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `/api/debug/radarr`        | Raw Radarr history, normalized records, extraction diagnostics, warnings|
+| `/api/debug/qbit`          | Raw qBittorrent torrents, normalized records, diagnostics, warnings     |
+| `/api/debug/seerr`         | Raw Seerr requests, normalized records, diagnostics, warnings           |
+| `/api/debug/states`        | Unique qBittorrent states, counts per state, and category classification|
+| `/api/debug/correlation`   | Per-trace match source (`torrent_hash`/`download_id`/`title_match`) + confidence |
+| `/api/debug/radarr-fields` | All Radarr history keys, frequency counts, seed-related candidate fields |
+
 ## Diagnosis labels
 
 | Diagnosis | Meaning |
 | --------- | ------- |
 | **Healthy / no issue detected** | The handoff looks fine. |
+| **Completed / seeding state** | The torrent has finished downloading and is seeding or idle (uploading, stalledUP, stoppedUP, pausedUP, …). Swarm-failure rules do not apply. |
 | **Possible stale indexer/tracker metadata or qBittorrent connectivity issue** | The indexer reported plenty of seeds, but qBittorrent sees zero peers and the torrent is stalled. |
 | **Likely bad low-availability release selected upstream** | The indexer reported few seeds and there are no actual peers — a poor release was probably chosen upstream. |
 | **Possible qBittorrent/VPN/network issue** | Many active torrents show zero peers at once — points at qBittorrent, a VPN, or the network rather than any single release. |
