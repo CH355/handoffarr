@@ -172,6 +172,27 @@ async def debug_states() -> JSONResponse:
     )
 
 
+@app.get("/api/debug/queue")
+async def debug_queue() -> JSONResponse:
+    return JSONResponse(
+        await asyncio.to_thread(qbittorrent.queue_report, get_config())
+    )
+
+
+@app.get("/api/debug/torrent/{torrent_hash}")
+async def debug_torrent(torrent_hash: str) -> JSONResponse:
+    result = await asyncio.to_thread(
+        qbittorrent.torrent_report, get_config(), torrent_hash
+    )
+    if result.get("ok"):
+        status_code = 200
+    elif "no torrent found" in (result.get("error") or ""):
+        status_code = 404
+    else:
+        status_code = 502
+    return JSONResponse(result, status_code=status_code)
+
+
 @app.get("/api/debug/correlation")
 async def debug_correlation() -> JSONResponse:
     config = get_config()

@@ -45,6 +45,29 @@
     .diag-warn { background: #3a2f17; color: #f1d99a; }
     .diag-bad { background: #3a1b1b; color: #f1a3a3; }
     .empty { color: #9aa0a6; padding: 32px 0; }
+    .queue-card {
+      background: #181b21; border: 1px solid #2a2e35; border-radius: 10px;
+      padding: 16px 18px; margin-bottom: 24px; max-width: 880px;
+    }
+    .queue-card h2 {
+      font-size: 14px; margin: 0 0 12px; color: #9aa0a6; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .queue-stats { display: flex; flex-wrap: wrap; gap: 22px; align-items: center; }
+    .stat { display: flex; flex-direction: column; }
+    .stat .num { font-size: 24px; font-weight: 600; line-height: 1.1; }
+    .stat .lbl { font-size: 11px; color: #9aa0a6; text-transform: uppercase;
+                 letter-spacing: 0.03em; }
+    .health { margin-left: auto; }
+    .health .diag { font-size: 13px; padding: 4px 12px; }
+    .queue-findings { margin: 12px 0 0; padding: 0; list-style: none;
+                      font-size: 12px; color: #c4c8cd; }
+    .queue-findings li { padding: 4px 0; border-top: 1px solid #23272e; }
+    .queue-findings li:first-child { border-top: 0; }
+    .sev-critical { color: #f1a3a3; }
+    .sev-warning { color: #f1d99a; }
+    .sev-info { color: #9aa0a6; }
+    .queue-card.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -57,6 +80,19 @@
   </header>
 
   <main>
+    {% if config_present %}
+      <section id="queue-card" class="queue-card hidden">
+        <h2>qBittorrent queue</h2>
+        <div class="queue-stats">
+          <div class="stat"><span class="num" id="q-queued">—</span><span class="lbl">Queued</span></div>
+          <div class="stat"><span class="num" id="q-stalled">—</span><span class="lbl">Stalled</span></div>
+          <div class="stat"><span class="num" id="q-active">—</span><span class="lbl">Active</span></div>
+          <div class="stat"><span class="num" id="q-completed">—</span><span class="lbl">Completed</span></div>
+          <div class="health"><span class="diag" id="q-health">—</span></div>
+        </div>
+        <ul class="queue-findings" id="q-findings"></ul>
+      </section>
+    {% endif %}
     {% if not config_present %}
       <div class="notice">
         <strong>Configuration not found.</strong>
@@ -128,6 +164,43 @@
       } catch (e) { /* ignore */ }
       location.reload();
     }
+
+    const HEALTH_CLASS = {
+      ok: 'diag-ok', warn: 'diag-warn', bad: 'diag-bad',
+    };
+
+    async function loadQueueCard() {
+      const card = document.getElementById('queue-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/debug/queue');
+        data = await resp.json();
+      } catch (e) { return; }
+      if (!data || !data.ok || !data.summary) return;
+
+      const s = data.summary;
+      document.getElementById('q-queued').textContent = s.queued_downloads ?? '—';
+      document.getElementById('q-stalled').textContent = s.stalled_downloads ?? '—';
+      document.getElementById('q-active').textContent = s.active_downloads ?? '—';
+      document.getElementById('q-completed').textContent = s.completed_torrents ?? '—';
+
+      const health = document.getElementById('q-health');
+      health.textContent = s.health || '—';
+      health.className = 'diag ' + (HEALTH_CLASS[s.health_severity] || 'diag-warn');
+
+      const list = document.getElementById('q-findings');
+      list.innerHTML = '';
+      (data.findings || []).forEach(f => {
+        const li = document.createElement('li');
+        li.className = 'sev-' + (f.severity || 'info');
+        li.textContent = f.title + ' — ' + f.detail;
+        list.appendChild(li);
+      });
+      card.classList.remove('hidden');
+    }
+
+    loadQueueCard();
   </script>
 </body>
 </html>

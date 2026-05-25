@@ -28,6 +28,13 @@ services:
     password: "PASTE_QBITTORRENT_PASSWORD_HERE"
     torrents_endpoint: "/api/v2/torrents/info"
     trackers_endpoint: "/api/v2/torrents/trackers"
+    # Optional overrides for the queue-diagnostics endpoints (defaults shown).
+    # transfer_info_endpoint: "/api/v2/transfer/info"
+    # preferences_endpoint: "/api/v2/app/preferences"
+    # speed_limits_mode_endpoint: "/api/v2/transfer/speedLimitsMode"
+    # maindata_endpoint: "/api/v2/sync/maindata"
+    # properties_endpoint: "/api/v2/torrents/properties"
+    # peers_endpoint: "/api/v2/sync/torrentPeers"
 
 thresholds:
   low_reported_seeds: 5
