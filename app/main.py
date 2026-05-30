@@ -269,11 +269,31 @@ async def api_responsibility() -> JSONResponse:
     return JSONResponse(
         {
             "assessments": assessments,
+            "top_responsible_domains": summary["top_responsible_domains"],
             "top_diagnosis": summary["top_diagnosis"],
             "top_responsible_domain": summary["top_responsible_domain"],
             "summary": summary,
         }
     )
+
+
+@app.get("/api/responsibility/{assessment_id}")
+async def api_responsibility_detail(assessment_id: str) -> JSONResponse:
+    for assessment in db.all_responsibility_assessments():
+        if str(assessment.get("assessment_id")) == assessment_id:
+            return JSONResponse(
+                {
+                    "assessment_id": assessment.get("assessment_id"),
+                    "diagnosis": assessment.get("diagnosis"),
+                    "responsible_domain": assessment.get("responsible_domain"),
+                    "confidence": assessment.get("confidence"),
+                    "evidence": assessment.get("evidence") or {},
+                    "impact": assessment.get("impact") or {},
+                    "recommended_action": assessment.get("recommended_action"),
+                    "observed_at": assessment.get("observed_at"),
+                }
+            )
+    return JSONResponse({"error": "assessment not found"}, status_code=404)
 
 
 @app.post("/api/poll-now")

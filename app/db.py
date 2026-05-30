@@ -553,7 +553,7 @@ def all_responsibility_assessments() -> list[dict[str, Any]]:
     with _lock, _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM responsibility_assessments "
-            "ORDER BY observed_at DESC, id DESC"
+            "ORDER BY observed_at DESC, id ASC"
         ).fetchall()
 
     assessments: list[dict[str, Any]] = []

@@ -125,6 +125,7 @@
             <div><span class="card-label">Impact</span><span class="card-value" id="r-impact">â€”</span></div>
           </div>
           <div class="card-row"><span class="card-label">Recommended Action</span><span id="r-action">â€”</span></div>
+          <div class="card-row"><span class="card-label">Evidence</span><span id="r-evidence">â€”</span></div>
         </section>
 
         <section id="storage-card" class="summary-card">
@@ -347,14 +348,19 @@
         return;
       }
       const impact = assessment.impact || {};
+      const evidence = assessment.evidence || {};
+      const affected = impact.affected_items ?? impact.affected_torrents ?? 'â€”';
       document.getElementById('r-answer').textContent =
         `${assessment.diagnosis}. ${assessment.responsible_domain} is ${confidenceText(assessment.confidence).toLowerCase()}.`;
       document.getElementById('r-diagnosis').textContent = assessment.diagnosis || 'â€”';
       document.getElementById('r-domain').textContent = assessment.responsible_domain || 'â€”';
       document.getElementById('r-confidence').textContent = assessment.confidence || 'â€”';
       document.getElementById('r-impact').textContent =
-        `${formatBytes(impact.retained_bytes)} retained across ${impact.affected_torrents ?? 'â€”'} completed torrents`;
+        `${formatBytes(impact.retained_bytes)} retained across ${affected} item(s)`;
       document.getElementById('r-action').textContent = assessment.recommended_action || 'â€”';
+      document.getElementById('r-evidence').textContent = Array.isArray(evidence.messages)
+        ? evidence.messages.join(' ')
+        : Object.entries(evidence).slice(0, 4).map(([key, value]) => `${key}: ${value}`).join(', ');
     }
 
     async function loadStorageCard() {

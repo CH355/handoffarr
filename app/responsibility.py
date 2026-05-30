@@ -1,7 +1,8 @@
-"""Responsibility and storage interpretation.
+"""Storage visibility and responsibility persistence orchestration.
 
 Pure helpers over persisted observations. Collectors gather facts, db.py stores
-them, and this module derives the current storage answer without doing I/O.
+them, and this module derives storage answers plus persists responsibility
+assessments produced by the pure engine.
 """
 
 from __future__ import annotations
@@ -13,6 +14,10 @@ from typing import Any
 
 from . import db, states
 from .config import Config
+from .responsibility_engine import (
+    build_responsibility_assessments as engine_build_responsibility_assessments,
+)
+from .responsibility_engine import summarize_assessments
 
 logger = logging.getLogger("handoffarr.responsibility")
 
@@ -179,61 +184,15 @@ def build_storage_summary(config: Config) -> dict[str, Any]:
 
 
 def build_responsibility_assessments(config: Config) -> list[dict[str, Any]]:
-    """Apply the MVP responsibility rule set."""
+    """Apply responsibility rules over persisted lifecycle evidence."""
     storage = build_storage_summary(config)
-    summary = storage["summary"]
-    observed_at = datetime.now(timezone.utc).isoformat()
-
-    completed_count = summary.get("completed_torrent_count") or 0
-    retained_bytes = summary.get("retained_bytes") or 0
-    free_bytes = summary.get("free_bytes")
-    warning_free_bytes = summary.get("warning_free_bytes")
-
-    if (
-        completed_count > summary.get("completed_torrent_threshold", 0)
-        and retained_bytes > summary.get("retained_bytes_threshold", 0)
-        and free_bytes is not None
-        and warning_free_bytes is not None
-        and free_bytes < warning_free_bytes
-    ):
-        hour_bucket = observed_at[:13]
-        return [
-            {
-                "assessment_id": f"storage:cleanup-subsystem:{hour_bucket}",
-                "lifecycle_stage": "Storage",
-                "diagnosis": "Storage Failure",
-                "responsible_domain": "Cleanup Subsystem",
-                "confidence": "High",
-                "evidence": [
-                    {
-                        "source": "qbittorrent",
-                        "field": "completed_torrents",
-                        "value": completed_count,
-                    },
-                    {
-                        "source": "qbittorrent",
-                        "field": "retained_bytes",
-                        "value": retained_bytes,
-                    },
-                    {
-                        "source": "filesystem",
-                        "field": "free_bytes",
-                        "value": free_bytes,
-                    },
-                ],
-                "impact": {
-                    "retained_bytes": retained_bytes,
-                    "affected_torrents": completed_count,
-                    "free_bytes": free_bytes,
-                },
-                "recommended_action": (
-                    "Review cleanup policy and completed torrent retention."
-                ),
-                "observed_at": observed_at,
-            }
-        ]
-
-    return []
+    return engine_build_responsibility_assessments(
+        traces=db.all_traces(),
+        import_events=db.all_import_events(),
+        library_artifacts=db.all_library_artifacts(),
+        cleanup_events=db.all_cleanup_events(),
+        storage_summary=storage,
+    )
 
 
 def run_responsibility(config: Config) -> int:
@@ -241,12 +200,3 @@ def run_responsibility(config: Config) -> int:
     db.replace_responsibility_assessments(assessments)
     logger.info("Responsibility produced %d assessments", len(assessments))
     return len(assessments)
-
-
-def summarize_assessments(assessments: list[dict[str, Any]]) -> dict[str, Any]:
-    top = assessments[0] if assessments else None
-    return {
-        "top_diagnosis": top.get("diagnosis") if top else None,
-        "top_responsible_domain": top.get("responsible_domain") if top else None,
-        "assessment_count": len(assessments),
-    }
