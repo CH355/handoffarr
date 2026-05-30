@@ -73,6 +73,47 @@ def init_db() -> None:
                 state_classification TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS import_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                import_id TEXT,
+                source_application TEXT,
+                media_type TEXT,
+                media_id TEXT,
+                media_title TEXT,
+                source_path TEXT,
+                destination_path TEXT,
+                import_status TEXT,
+                import_timestamp TEXT,
+                evidence_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS library_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_id TEXT,
+                media_id TEXT,
+                media_title TEXT,
+                media_type TEXT,
+                library_path TEXT,
+                file_exists INTEGER,
+                file_size INTEGER,
+                source_application TEXT,
+                observed_at TEXT,
+                evidence_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS cleanup_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cleanup_id TEXT,
+                media_id TEXT,
+                media_title TEXT,
+                source_application TEXT,
+                torrent_hash TEXT,
+                cleanup_status TEXT,
+                retained_bytes INTEGER,
+                cleanup_timestamp TEXT,
+                evidence_json TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS responsibility_assessments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 assessment_id TEXT,
@@ -94,6 +135,18 @@ def init_db() -> None:
                 ON raw_events (torrent_hash);
             CREATE INDEX IF NOT EXISTS idx_responsibility_assessments_domain
                 ON responsibility_assessments (responsible_domain, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_import_events_media
+                ON import_events (media_id, import_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_import_events_status
+                ON import_events (import_status, import_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_library_artifacts_media
+                ON library_artifacts (media_id, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_library_artifacts_path
+                ON library_artifacts (library_path);
+            CREATE INDEX IF NOT EXISTS idx_cleanup_events_media
+                ON cleanup_events (media_id, cleanup_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_cleanup_events_status
+                ON cleanup_events (cleanup_status, cleanup_timestamp);
             """
         )
         _migrate_handoff_traces(conn)
@@ -111,6 +164,16 @@ _TRACE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("state_classification", "TEXT"),
     ("seerr_status", "TEXT"),
     ("dlspeed", "INTEGER"),
+    ("import_status", "TEXT"),
+    ("imported_by", "TEXT"),
+    ("import_timestamp", "TEXT"),
+    ("library_status", "TEXT"),
+    ("library_path", "TEXT"),
+    ("library_size", "INTEGER"),
+    ("potential_cleanup_candidate", "INTEGER"),
+    ("cleanup_status", "TEXT"),
+    ("retained_bytes", "INTEGER"),
+    ("recoverable_bytes", "INTEGER"),
 )
 
 
@@ -201,8 +264,11 @@ def replace_traces(traces: list[dict[str, Any]]) -> None:
                      reported_indexer, qbittorrent_state, actual_seeds,
                      actual_peers, dlspeed, diagnosis, updated_at, match_source,
                      match_confidence, match_reasons, normalized_title,
-                     state_classification)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     state_classification, import_status, imported_by,
+                     import_timestamp, library_status, library_path, library_size,
+                     potential_cleanup_candidate, cleanup_status, retained_bytes,
+                     recoverable_bytes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     t.get("title"),
@@ -227,6 +293,16 @@ def replace_traces(traces: list[dict[str, Any]]) -> None:
                     json.dumps(reasons) if reasons is not None else None,
                     t.get("normalized_title"),
                     t.get("state_classification"),
+                    t.get("import_status"),
+                    t.get("imported_by"),
+                    t.get("import_timestamp"),
+                    t.get("library_status"),
+                    t.get("library_path"),
+                    t.get("library_size"),
+                    1 if t.get("potential_cleanup_candidate") else 0,
+                    t.get("cleanup_status"),
+                    t.get("retained_bytes"),
+                    t.get("recoverable_bytes"),
                 ),
             )
 
@@ -249,8 +325,196 @@ def all_traces() -> list[dict[str, Any]]:
                 trace["match_reasons"] = [raw_reasons]
         else:
             trace["match_reasons"] = []
+        if "potential_cleanup_candidate" in trace:
+            trace["potential_cleanup_candidate"] = bool(
+                trace.get("potential_cleanup_candidate")
+            )
         traces.append(trace)
     return traces
+
+
+def replace_cleanup_events(cleanup_events: list[dict[str, Any]]) -> None:
+    """Replace the current cleanup visibility snapshot."""
+    observed_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM cleanup_events")
+        for event in cleanup_events:
+            conn.execute(
+                """
+                INSERT INTO cleanup_events
+                    (cleanup_id, media_id, media_title, source_application,
+                     torrent_hash, cleanup_status, retained_bytes,
+                     cleanup_timestamp, evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.get("cleanup_id"),
+                    str(event.get("media_id"))
+                    if event.get("media_id") is not None
+                    else None,
+                    event.get("media_title"),
+                    event.get("source_application"),
+                    event.get("torrent_hash"),
+                    event.get("cleanup_status"),
+                    event.get("retained_bytes"),
+                    event.get("cleanup_timestamp") or observed_default,
+                    json.dumps(event.get("evidence") or {}, default=str),
+                ),
+            )
+
+
+def all_cleanup_events(media_id: str | None = None) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        if media_id is None:
+            rows = conn.execute(
+                "SELECT * FROM cleanup_events "
+                "ORDER BY cleanup_timestamp DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cleanup_events WHERE media_id = ? "
+                "ORDER BY cleanup_timestamp DESC, id DESC",
+                (media_id,),
+            ).fetchall()
+
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = dict(row)
+        raw_evidence = event.pop("evidence_json", None)
+        if raw_evidence:
+            try:
+                event["evidence"] = json.loads(raw_evidence)
+            except (TypeError, ValueError):
+                event["evidence"] = {}
+        else:
+            event["evidence"] = {}
+        status = event.get("cleanup_status")
+        retained = event.get("retained_bytes") or 0
+        event["recoverable_bytes"] = (
+            retained
+            if status in {"Cleanup Pending", "Cleanup Failed"}
+            else 0
+        )
+        events.append(event)
+    return events
+
+
+def replace_import_events(import_events: list[dict[str, Any]]) -> None:
+    """Replace the current import visibility snapshot."""
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM import_events")
+        for event in import_events:
+            conn.execute(
+                """
+                INSERT INTO import_events
+                    (import_id, source_application, media_type, media_id,
+                     media_title, source_path, destination_path, import_status,
+                     import_timestamp, evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.get("import_id"),
+                    event.get("source_application"),
+                    event.get("media_type"),
+                    str(event.get("media_id"))
+                    if event.get("media_id") is not None
+                    else None,
+                    event.get("media_title"),
+                    event.get("source_path"),
+                    event.get("destination_path"),
+                    event.get("import_status"),
+                    event.get("import_timestamp"),
+                    json.dumps(event.get("evidence") or {}, default=str),
+                ),
+            )
+
+
+def all_import_events(media_id: str | None = None) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        if media_id is None:
+            rows = conn.execute(
+                "SELECT * FROM import_events ORDER BY import_timestamp DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM import_events WHERE media_id = ? "
+                "ORDER BY import_timestamp DESC, id DESC",
+                (media_id,),
+            ).fetchall()
+
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = dict(row)
+        raw_evidence = event.pop("evidence_json", None)
+        if raw_evidence:
+            try:
+                event["evidence"] = json.loads(raw_evidence)
+            except (TypeError, ValueError):
+                event["evidence"] = {}
+        else:
+            event["evidence"] = {}
+        events.append(event)
+    return events
+
+
+def replace_library_artifacts(artifacts: list[dict[str, Any]]) -> None:
+    """Replace the current library visibility snapshot."""
+    observed_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM library_artifacts")
+        for artifact in artifacts:
+            conn.execute(
+                """
+                INSERT INTO library_artifacts
+                    (artifact_id, media_id, media_title, media_type, library_path,
+                     file_exists, file_size, source_application, observed_at,
+                     evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact.get("artifact_id"),
+                    str(artifact.get("media_id"))
+                    if artifact.get("media_id") is not None
+                    else None,
+                    artifact.get("media_title"),
+                    artifact.get("media_type"),
+                    artifact.get("library_path"),
+                    1 if artifact.get("file_exists") else 0,
+                    artifact.get("file_size"),
+                    artifact.get("source_application"),
+                    artifact.get("observed_at") or observed_default,
+                    json.dumps(artifact.get("evidence") or {}, default=str),
+                ),
+            )
+
+
+def all_library_artifacts(media_id: str | None = None) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        if media_id is None:
+            rows = conn.execute(
+                "SELECT * FROM library_artifacts ORDER BY observed_at DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM library_artifacts WHERE media_id = ? "
+                "ORDER BY observed_at DESC, id DESC",
+                (media_id,),
+            ).fetchall()
+
+    artifacts: list[dict[str, Any]] = []
+    for row in rows:
+        artifact = dict(row)
+        artifact["file_exists"] = bool(artifact.get("file_exists"))
+        raw_evidence = artifact.pop("evidence_json", None)
+        if raw_evidence:
+            try:
+                artifact["evidence"] = json.loads(raw_evidence)
+            except (TypeError, ValueError):
+                artifact["evidence"] = {}
+        else:
+            artifact["evidence"] = {}
+        artifacts.append(artifact)
+    return artifacts
 
 
 def replace_responsibility_assessments(assessments: list[dict[str, Any]]) -> None:

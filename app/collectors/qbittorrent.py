@@ -829,6 +829,8 @@ def _normalize_torrent_full(t: dict[str, Any]) -> dict[str, Any]:
             "downloaded": _to_int(t.get("downloaded")),
             "uploaded": _to_int(t.get("uploaded")),
             "amount_left": _to_int(t.get("amount_left")),
+            "ratio": t.get("ratio"),
+            "seeding_time": _to_int(t.get("seeding_time")),
             "availability": t.get("availability"),
             "category": t.get("category"),
             "tags": t.get("tags"),

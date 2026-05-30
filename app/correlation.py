@@ -15,6 +15,7 @@ from typing import Any
 
 from . import db, states
 from .config import Config
+from .library import enrich_library_artifacts
 
 logger = logging.getLogger("handoffarr.correlation")
 
@@ -151,8 +152,15 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
     title_window = int(matching.get("title_time_window_minutes", 60))
 
     seerr_events = db.events_for_source_since("seerr", since)
-    radarr_events = db.events_for_source_since("radarr", since)
+    radarr_events = [
+        event
+        for event in db.events_for_source_since("radarr", since)
+        if not str(event.get("event_type") or "").startswith("import_")
+    ]
     qbit_events = db.events_for_source_since("qbittorrent", since)
+    import_events = db.all_import_events()
+    library_artifacts = enrich_library_artifacts(db.all_library_artifacts(), config)
+    cleanup_events = db.all_cleanup_events()
 
     # Latest snapshot per entity.
     seerr_by_id = _latest_by(seerr_events, lambda e: e.get("external_id"))
@@ -165,6 +173,45 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
         norm = _normalize_title(ev.get("title"))
         if norm and norm not in qbit_by_norm_title:
             qbit_by_norm_title[norm] = ev
+
+    imports_by_hash: dict[str, dict[str, Any]] = {}
+    imports_by_download_id: dict[str, dict[str, Any]] = {}
+    imports_by_norm_title: dict[str, dict[str, Any]] = {}
+    for ev in import_events:
+        evidence = ev.get("evidence") or {}
+        torrent_hash = str(evidence.get("torrent_hash") or "").lower()
+        download_id = str(evidence.get("download_id") or "")
+        norm = _normalize_title(ev.get("media_title") or ev.get("source_path"))
+        if torrent_hash and torrent_hash not in imports_by_hash:
+            imports_by_hash[torrent_hash] = ev
+        if download_id and download_id not in imports_by_download_id:
+            imports_by_download_id[download_id] = ev
+        if norm and norm not in imports_by_norm_title:
+            imports_by_norm_title[norm] = ev
+
+    library_by_media_id: dict[str, dict[str, Any]] = {}
+    library_by_norm_title: dict[str, dict[str, Any]] = {}
+    for artifact in library_artifacts:
+        media_id = str(artifact.get("media_id") or "")
+        norm = _normalize_title(artifact.get("media_title"))
+        if media_id and media_id not in library_by_media_id:
+            library_by_media_id[media_id] = artifact
+        if norm and norm not in library_by_norm_title:
+            library_by_norm_title[norm] = artifact
+
+    cleanup_by_media_id: dict[str, dict[str, Any]] = {}
+    cleanup_by_hash: dict[str, dict[str, Any]] = {}
+    cleanup_by_norm_title: dict[str, dict[str, Any]] = {}
+    for event in cleanup_events:
+        media_id = str(event.get("media_id") or "")
+        torrent_hash = str(event.get("torrent_hash") or "").lower()
+        norm = _normalize_title(event.get("media_title"))
+        if media_id and media_id not in cleanup_by_media_id:
+            cleanup_by_media_id[media_id] = event
+        if torrent_hash and torrent_hash not in cleanup_by_hash:
+            cleanup_by_hash[torrent_hash] = event
+        if norm and norm not in cleanup_by_norm_title:
+            cleanup_by_norm_title[norm] = event
 
     # Network-wide stall heuristic across actively-downloading torrents only.
     # Completed / seeding torrents legitimately show zero download peers, so
@@ -239,6 +286,26 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
             match_reasons.append("no qBittorrent torrent matched")
 
         q_payload = _parse_payload(q_ev) if q_ev else {}
+        import_ev = None
+        q_hash = (q_ev.get("torrent_hash") or "").lower() if q_ev else torrent_hash
+        if q_hash:
+            import_ev = imports_by_hash.get(q_hash)
+        if import_ev is None and download_id:
+            import_ev = imports_by_download_id.get(str(download_id))
+        if import_ev is None and norm_title:
+            import_ev = imports_by_norm_title.get(norm_title)
+        library_artifact = None
+        if import_ev and import_ev.get("media_id") is not None:
+            library_artifact = library_by_media_id.get(str(import_ev.get("media_id")))
+        if library_artifact is None and norm_title:
+            library_artifact = library_by_norm_title.get(norm_title)
+        cleanup_event = None
+        if import_ev and import_ev.get("media_id") is not None:
+            cleanup_event = cleanup_by_media_id.get(str(import_ev.get("media_id")))
+        if cleanup_event is None and q_hash:
+            cleanup_event = cleanup_by_hash.get(q_hash)
+        if cleanup_event is None and norm_title:
+            cleanup_event = cleanup_by_norm_title.get(norm_title)
 
         # --- Match Seerr request by normalized title within time window ---
         seerr_id = None
@@ -294,6 +361,43 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
                 "actual_seeds": q_payload.get("seeds"),
                 "actual_peers": q_payload.get("peers"),
                 "dlspeed": q_payload.get("dlspeed"),
+                "import_status": import_ev.get("import_status") if import_ev else None,
+                "imported_by": import_ev.get("source_application") if import_ev else None,
+                "import_timestamp": import_ev.get("import_timestamp") if import_ev else None,
+                "library_status": (
+                    library_artifact.get("library_status")
+                    if library_artifact
+                    else None
+                ),
+                "library_path": (
+                    library_artifact.get("library_path")
+                    if library_artifact
+                    else None
+                ),
+                "library_size": (
+                    library_artifact.get("file_size")
+                    if library_artifact
+                    else None
+                ),
+                "potential_cleanup_candidate": bool(
+                    library_artifact
+                    and library_artifact.get("potential_cleanup_candidate")
+                ),
+                "cleanup_status": (
+                    cleanup_event.get("cleanup_status")
+                    if cleanup_event
+                    else None
+                ),
+                "retained_bytes": (
+                    cleanup_event.get("retained_bytes")
+                    if cleanup_event
+                    else None
+                ),
+                "recoverable_bytes": (
+                    cleanup_event.get("recoverable_bytes")
+                    if cleanup_event
+                    else None
+                ),
                 "match_source": match_source,
                 "match_confidence": match_confidence,
                 "match_reasons": match_reasons,
@@ -365,6 +469,16 @@ def correlation_report(config: Config) -> list[dict[str, Any]]:
                 "match_reasons": t.get("match_reasons"),
                 "qbittorrent_state": t.get("qbittorrent_state"),
                 "state_classification": t.get("state_classification"),
+                "import_status": t.get("import_status"),
+                "imported_by": t.get("imported_by"),
+                "import_timestamp": t.get("import_timestamp"),
+                "library_status": t.get("library_status"),
+                "library_path": t.get("library_path"),
+                "library_size": t.get("library_size"),
+                "potential_cleanup_candidate": t.get("potential_cleanup_candidate"),
+                "cleanup_status": t.get("cleanup_status"),
+                "retained_bytes": t.get("retained_bytes"),
+                "recoverable_bytes": t.get("recoverable_bytes"),
                 "diagnosis": t.get("diagnosis"),
             }
         )

@@ -137,7 +137,54 @@
           </div>
           <div class="card-row"><span class="card-label">Top contributor</span><span id="s-top">â€”</span></div>
         </section>
+
+        <section id="import-card" class="summary-card">
+          <h2>Import Health</h2>
+          <div class="queue-stats">
+            <div class="stat"><span class="num" id="i-success">-</span><span class="lbl">Successful</span></div>
+            <div class="stat"><span class="num" id="i-failed">-</span><span class="lbl">Failed</span></div>
+            <div class="stat"><span class="num" id="i-pending">-</span><span class="lbl">Pending</span></div>
+            <div class="health"><span class="diag" id="i-health">-</span></div>
+          </div>
+          <div class="card-row"><span class="card-label">Recent import</span><span id="i-recent">-</span></div>
+        </section>
+
+        <section id="library-card" class="summary-card">
+          <h2>Library Health</h2>
+          <div class="queue-stats">
+            <div class="stat"><span class="num" id="l-present">-</span><span class="lbl">Present</span></div>
+            <div class="stat"><span class="num" id="l-missing">-</span><span class="lbl">Missing</span></div>
+            <div class="stat"><span class="num" id="l-unknown">-</span><span class="lbl">Unknown</span></div>
+            <div class="stat"><span class="num" id="l-candidates">-</span><span class="lbl">Potential cleanup</span></div>
+          </div>
+          <div class="card-row"><span class="card-label">Latest verified path</span><span id="l-path">-</span></div>
+        </section>
+
+        <section id="cleanup-card" class="summary-card">
+          <h2>Cleanup Health</h2>
+          <div class="queue-stats">
+            <div class="stat"><span class="num" id="c-completed">-</span><span class="lbl">Completed</span></div>
+            <div class="stat"><span class="num" id="c-pending">-</span><span class="lbl">Pending</span></div>
+            <div class="stat"><span class="num" id="c-failed">-</span><span class="lbl">Failed</span></div>
+            <div class="stat"><span class="num" id="c-intentional">-</span><span class="lbl">Intentional</span></div>
+          </div>
+          <div class="card-row"><span class="card-label">Recoverable Space</span><span id="c-recoverable">-</span></div>
+        </section>
       </div>
+
+      <section id="cleanup-candidates-card" class="queue-card hidden">
+        <h2>Top Cleanup Candidates</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Media title</th>
+              <th>Retained bytes</th>
+              <th>Cleanup status</th>
+            </tr>
+          </thead>
+          <tbody id="c-candidates"></tbody>
+        </table>
+      </section>
 
       <section id="queue-card" class="queue-card hidden">
         <h2>qBittorrent queue</h2>
@@ -181,6 +228,14 @@
             <th>Reported indexer</th>
             <th>qBittorrent state</th>
             <th>State class</th>
+            <th>Import status</th>
+            <th>Imported by</th>
+            <th>Library status</th>
+            <th>Library path</th>
+            <th>Potential cleanup</th>
+            <th>Cleanup status</th>
+            <th>Retained</th>
+            <th>Recoverable</th>
             <th>Actual seeds</th>
             <th>Actual peers</th>
             <th>Diagnosis</th>
@@ -219,6 +274,14 @@
               <td>{{ t.reported_indexer or "—" }}</td>
               <td>{{ t.qbittorrent_state or "—" }}</td>
               <td>{% if t.state_classification %}<span class="state-class">{{ t.state_classification }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>{{ t.import_status or "—" }}</td>
+              <td>{{ t.imported_by or "—" }}</td>
+              <td>{{ t.library_status or "—" }}</td>
+              <td>{{ t.library_path or "—" }}</td>
+              <td>{% if t.potential_cleanup_candidate %}Yes{% else %}No{% endif %}</td>
+              <td>{{ t.cleanup_status or "—" }}</td>
+              <td>{{ t.retained_bytes if t.retained_bytes is not none else "—" }}</td>
+              <td>{{ t.recoverable_bytes if t.recoverable_bytes is not none else "—" }}</td>
               <td>{{ t.actual_seeds if t.actual_seeds is not none else "—" }}</td>
               <td>{{ t.actual_peers if t.actual_peers is not none else "—" }}</td>
               <td><span class="diag {{ cls }}">{{ d or "—" }}</span></td>
@@ -315,6 +378,93 @@
         : 'â€”';
     }
 
+    async function loadImportCard() {
+      const card = document.getElementById('import-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/imports');
+        data = await resp.json();
+      } catch (e) { return; }
+      const summary = data.summary || {};
+      document.getElementById('i-success').textContent = summary.success ?? '-';
+      document.getElementById('i-failed').textContent = summary.failed ?? '-';
+      document.getElementById('i-pending').textContent = summary.pending ?? '-';
+      const health = document.getElementById('i-health');
+      if ((summary.failed || 0) > 0) {
+        health.textContent = 'failures';
+        health.className = 'diag diag-bad';
+      } else if ((summary.pending || 0) > 0) {
+        health.textContent = 'pending';
+        health.className = 'diag diag-warn';
+      } else {
+        health.textContent = 'healthy';
+        health.className = 'diag diag-ok';
+      }
+      const recent = (data.recent_imports || [])[0];
+      document.getElementById('i-recent').textContent = recent
+        ? `${recent.media_title || recent.media_id || 'unknown'} - ${recent.import_status || 'unknown'}`
+        : '-';
+    }
+
+    async function loadLibraryCard() {
+      const card = document.getElementById('library-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/library');
+        data = await resp.json();
+      } catch (e) { return; }
+      const summary = data.summary || {};
+      document.getElementById('l-present').textContent = summary.present ?? '-';
+      document.getElementById('l-missing').textContent = summary.missing ?? '-';
+      document.getElementById('l-unknown').textContent = summary.unknown ?? '-';
+      document.getElementById('l-candidates').textContent =
+        summary.potential_cleanup_candidates ?? '-';
+      const present = (data.present || [])[0];
+      document.getElementById('l-path').textContent = present
+        ? (present.library_path || '-')
+        : '-';
+    }
+
+    async function loadCleanupCard() {
+      const card = document.getElementById('cleanup-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/cleanup');
+        data = await resp.json();
+      } catch (e) { return; }
+      const summary = data.summary || {};
+      document.getElementById('c-completed').textContent = summary.completed ?? '-';
+      document.getElementById('c-pending').textContent = summary.pending ?? '-';
+      document.getElementById('c-failed').textContent = summary.failed ?? '-';
+      document.getElementById('c-intentional').textContent = summary.intentional ?? '-';
+      document.getElementById('c-recoverable').textContent =
+        formatBytes(summary.total_recoverable_bytes);
+
+      const candidatesCard = document.getElementById('cleanup-candidates-card');
+      const body = document.getElementById('c-candidates');
+      if (!candidatesCard || !body) return;
+      body.innerHTML = '';
+      (data.top_cleanup_candidates || []).forEach(item => {
+        const tr = document.createElement('tr');
+        const title = document.createElement('td');
+        const retained = document.createElement('td');
+        const status = document.createElement('td');
+        title.textContent = item.media_title || item.media_id || 'unknown';
+        retained.textContent = formatBytes(item.retained_bytes);
+        status.textContent = item.cleanup_status || '-';
+        tr.appendChild(title);
+        tr.appendChild(retained);
+        tr.appendChild(status);
+        body.appendChild(tr);
+      });
+      if ((data.top_cleanup_candidates || []).length > 0) {
+        candidatesCard.classList.remove('hidden');
+      }
+    }
+
     async function loadQueueCard() {
       const card = document.getElementById('queue-card');
       if (!card) return;
@@ -348,6 +498,9 @@
 
     loadResponsibilityCard();
     loadStorageCard();
+    loadImportCard();
+    loadLibraryCard();
+    loadCleanupCard();
     loadQueueCard();
   </script>
 </body>

@@ -18,9 +18,26 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from . import db, timeline
-from .collectors import filesystem, qbittorrent, radarr, seerr
+from .collectors import (
+    cleanup as cleanup_collector,
+    filesystem,
+    library as library_collector,
+    lidarr_imports,
+    qbittorrent,
+    radarr,
+    radarr_imports,
+    seerr,
+    sonarr_imports,
+)
+from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visibility
 from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
+from .imports import imports_response, media_import_response, run_import_visibility
+from .library import (
+    library_response,
+    media_library_response,
+    run_library_visibility,
+)
 from .responsibility import (
     build_storage_summary,
     run_responsibility,
@@ -59,6 +76,14 @@ def poll_once() -> dict[str, int]:
             "radarr": 0,
             "qbittorrent": 0,
             "filesystem": 0,
+            "sonarr_imports": 0,
+            "radarr_imports": 0,
+            "lidarr_imports": 0,
+            "imports": 0,
+            "library_collector": 0,
+            "library": 0,
+            "cleanup_collector": 0,
+            "cleanup": 0,
             "traces": 0,
             "responsibility": 0,
         }
@@ -66,6 +91,9 @@ def poll_once() -> dict[str, int]:
     for name, fn in (
         ("seerr", seerr.collect),
         ("radarr", radarr.collect),
+        ("sonarr_imports", sonarr_imports.collect),
+        ("radarr_imports", radarr_imports.collect),
+        ("lidarr_imports", lidarr_imports.collect),
         ("qbittorrent", qbittorrent.collect),
         ("filesystem", filesystem.collect),
     ):
@@ -75,6 +103,31 @@ def poll_once() -> dict[str, int]:
             logger.error("Collector %s crashed: %s", name, exc)
             results[name] = 0
 
+    try:
+        results["imports"] = run_import_visibility(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Import visibility crashed: %s", exc)
+        results["imports"] = 0
+    try:
+        results["library_collector"] = library_collector.collect(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Library collector crashed: %s", exc)
+        results["library_collector"] = 0
+    try:
+        results["library"] = run_library_visibility(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Library visibility crashed: %s", exc)
+        results["library"] = 0
+    try:
+        results["cleanup_collector"] = cleanup_collector.collect(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Cleanup collector crashed: %s", exc)
+        results["cleanup_collector"] = 0
+    try:
+        results["cleanup"] = run_cleanup_visibility(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Cleanup visibility crashed: %s", exc)
+        results["cleanup"] = 0
     try:
         results["traces"] = run_correlation(config)
     except Exception as exc:  # noqa: BLE001
@@ -177,6 +230,38 @@ async def api_storage() -> JSONResponse:
     return JSONResponse(build_storage_summary(get_config()))
 
 
+@app.get("/api/imports")
+async def api_imports() -> JSONResponse:
+    return JSONResponse(imports_response(db.all_import_events()))
+
+
+@app.get("/api/imports/{media_id}")
+async def api_import_media(media_id: str) -> JSONResponse:
+    return JSONResponse(media_import_response(media_id, db.all_import_events(media_id)))
+
+
+@app.get("/api/library")
+async def api_library() -> JSONResponse:
+    return JSONResponse(library_response(db.all_library_artifacts(), get_config()))
+
+
+@app.get("/api/library/{media_id}")
+async def api_library_media(media_id: str) -> JSONResponse:
+    return JSONResponse(
+        media_library_response(media_id, db.all_library_artifacts(media_id), get_config())
+    )
+
+
+@app.get("/api/cleanup")
+async def api_cleanup() -> JSONResponse:
+    return JSONResponse(cleanup_response(db.all_cleanup_events()))
+
+
+@app.get("/api/cleanup/{media_id}")
+async def api_cleanup_media(media_id: str) -> JSONResponse:
+    return JSONResponse(media_cleanup_response(media_id, db.all_cleanup_events(media_id)))
+
+
 @app.get("/api/responsibility")
 async def api_responsibility() -> JSONResponse:
     assessments = db.all_responsibility_assessments()
@@ -264,3 +349,10 @@ async def debug_correlation() -> JSONResponse:
 @app.get("/api/debug/radarr-fields")
 async def debug_radarr_fields() -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(radarr.discover_fields, get_config()))
+
+
+@app.get("/api/debug/library")
+async def debug_library() -> JSONResponse:
+    return JSONResponse(
+        await asyncio.to_thread(library_collector.inspect, get_config())
+    )

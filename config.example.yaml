@@ -19,6 +19,27 @@ storage:
     completed_torrent_count: 25
     retained_bytes: 107374182400         # 100 GiB
 
+library:
+  enabled: false
+  roots:
+    - label: shows
+      media_type: series
+      path: "/PlexMedia/Shows"
+    - label: movies
+      media_type: movie
+      path: "/PlexMedia/Movies"
+    - label: music
+      media_type: music
+      path: "/PlexMedia/Music"
+  max_scan_entries: 5000
+
+cleanup:
+  thresholds:
+    failure_after_hours: 24
+    # Optional. When set, torrents below this ratio are treated as intentional
+    # retention rather than recoverable cleanup candidates.
+    retention_min_ratio:
+
 services:
   seerr:
     enabled: true
@@ -31,6 +52,18 @@ services:
     base_url: "http://radarr:7878"
     api_key: "PASTE_RADARR_API_KEY_HERE"
     history_endpoint: "/api/v3/history"
+
+  sonarr:
+    enabled: false
+    base_url: "http://sonarr:8989"
+    api_key: "PASTE_SONARR_API_KEY_HERE"
+    history_endpoint: "/api/v3/history"
+
+  lidarr:
+    enabled: false
+    base_url: "http://lidarr:8686"
+    api_key: "PASTE_LIDARR_API_KEY_HERE"
+    history_endpoint: "/api/v1/history"
 
   qbittorrent:
     enabled: true

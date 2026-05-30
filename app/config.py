@@ -40,6 +40,17 @@ DEFAULTS: dict[str, Any] = {
             "retained_bytes": 107374182400,
         },
     },
+    "library": {
+        "enabled": False,
+        "roots": [],
+        "max_scan_entries": 5000,
+    },
+    "cleanup": {
+        "thresholds": {
+            "failure_after_hours": 24,
+            "retention_min_ratio": None,
+        },
+    },
     "matching": {
         "prefer_torrent_hash": True,
         "fallback_to_download_id": True,
