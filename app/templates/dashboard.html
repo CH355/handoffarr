@@ -102,6 +102,13 @@
     .prio-high { background: #3a2f17; color: #f1d99a; }
     .prio-medium { background: #1f2937; color: #c4c8cd; }
     .prio-low { background: #11331f; color: #7ee2a8; }
+    .quality { font-size: 12px; padding: 2px 8px; border-radius: 12px; display: inline-block;
+               white-space: nowrap; font-weight: 600; }
+    .quality-good { background: #11331f; color: #7ee2a8; }
+    .quality-acceptable { background: #1f2937; color: #c4c8cd; }
+    .quality-questionable { background: #3a2f17; color: #f1d99a; }
+    .quality-bad { background: #3a1b1b; color: #f1a3a3; }
+    .quality-unknown { background: #262a31; color: #9aa0a6; }
     .lifecycle-card { background: #181b21; border: 1px solid #2a2e35;
                       border-radius: 10px; padding: 16px 18px; margin-bottom: 24px; }
     .lifecycle-card h2 { font-size: 14px; margin: 0 0 12px; color: #9aa0a6;
@@ -145,6 +152,40 @@
 
   <main>
     {% if config_present %}
+      <section id="decision-card" class="queue-card hidden">
+        <h2>Decision Center</h2>
+        <div class="card-row" id="decision-summary"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Selected Release</th>
+              <th>Indexer</th>
+              <th>Decision Quality</th>
+              <th>Candidate Count</th>
+              <th>Confidence</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="decision-body"></tbody>
+        </table>
+      </section>
+
+      <section id="bad-decision-card" class="queue-card hidden">
+        <h2>Bad Decisions</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Media Title</th>
+              <th>Selected Release</th>
+              <th>Indexer</th>
+              <th>Decision Quality</th>
+              <th>Evidence</th>
+            </tr>
+          </thead>
+          <tbody id="bad-decision-body"></tbody>
+        </table>
+      </section>
+
       <section id="lifecycle-card" class="lifecycle-card hidden">
         <h2>Lifecycle Timeline</h2>
         <div class="card-row" id="lifecycle-summary"></div>
@@ -701,6 +742,81 @@
       if (timelines.length > 0) card.classList.remove('hidden');
     }
 
+    const QUALITY_CLASS = {
+      'Good Selection': 'quality-good',
+      'Acceptable Selection': 'quality-acceptable',
+      'Questionable Selection': 'quality-questionable',
+      'Bad Selection': 'quality-bad',
+      'Unknown': 'quality-unknown',
+    };
+
+    function evidenceText(evidence) {
+      if (!evidence) return '—';
+      if (Array.isArray(evidence.messages) && evidence.messages.length) {
+        return evidence.messages.join(' ');
+      }
+      return Object.entries(evidence).slice(0, 3)
+        .map(([k, v]) => k + ': ' + v).join(', ') || '—';
+    }
+
+    async function loadDecisionCard() {
+      const card = document.getElementById('decision-card');
+      const badCard = document.getElementById('bad-decision-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/decisions');
+        data = await resp.json();
+      } catch (e) { return; }
+      const summary = data.summary || {};
+      const summaryEl = document.getElementById('decision-summary');
+      if (summaryEl) {
+        const topBad = (summary.top_bad_indexers || [])[0];
+        const topBadLabel = topBad ? topBad[0] + ' (' + topBad[1] + ')' : '—';
+        summaryEl.innerHTML =
+          '<span class="card-label">Summary</span>' +
+          '<span>' + (summary.total || 0) + ' decision(s); ' +
+          (summary.good || 0) + ' good, ' +
+          (summary.acceptable || 0) + ' acceptable, ' +
+          (summary.questionable || 0) + ' questionable, ' +
+          (summary.bad || 0) + ' bad, ' +
+          (summary.unknown || 0) + ' unknown. Top bad indexer: ' + topBadLabel + '.</span>';
+      }
+      const body = document.getElementById('decision-body');
+      body.innerHTML = '';
+      (data.assessments || []).forEach(a => {
+        const tr = document.createElement('tr');
+        const cls = QUALITY_CLASS[a.decision_quality] || 'quality-unknown';
+        tr.innerHTML =
+          '<td>' + (a.selected_release || '—') + '</td>' +
+          '<td>' + (a.source_indexer || '—') + '</td>' +
+          '<td><span class="quality ' + cls + '">' + (a.decision_quality || 'Unknown') + '</span></td>' +
+          '<td>' + (a.candidate_count ?? '—') + '</td>' +
+          '<td>' + (a.confidence || '—') + '</td>' +
+          '<td>' + (a.decision_reason || '—') + '</td>';
+        body.appendChild(tr);
+      });
+      if ((data.assessments || []).length > 0) card.classList.remove('hidden');
+
+      const badBody = document.getElementById('bad-decision-body');
+      if (badBody && badCard) {
+        badBody.innerHTML = '';
+        (data.bad_decisions || []).forEach(a => {
+          const tr = document.createElement('tr');
+          const cls = QUALITY_CLASS[a.decision_quality] || 'quality-bad';
+          tr.innerHTML =
+            '<td>' + (a.media_title || a.media_id || 'unknown') + '</td>' +
+            '<td>' + (a.selected_release || '—') + '</td>' +
+            '<td>' + (a.source_indexer || '—') + '</td>' +
+            '<td><span class="quality ' + cls + '">' + (a.decision_quality || 'Bad Selection') + '</span></td>' +
+            '<td>' + evidenceText(a.evidence) + '</td>';
+          badBody.appendChild(tr);
+        });
+        if ((data.bad_decisions || []).length > 0) badCard.classList.remove('hidden');
+      }
+    }
+
+    loadDecisionCard();
     loadLifecycleCard();
     loadRecommendationsCard();
     loadResponsibilityCard();

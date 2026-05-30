@@ -20,6 +20,7 @@ from starlette.requests import Request
 from . import db, timeline
 from .collectors import (
     cleanup as cleanup_collector,
+    decision as decision_collector,
     filesystem,
     library as library_collector,
     lidarr_imports,
@@ -32,6 +33,11 @@ from .collectors import (
 from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visibility
 from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
+from .decision import (
+    decisions_response,
+    media_decision_response,
+    run_decisions,
+)
 from .imports import imports_response, media_import_response, run_import_visibility
 from .library import (
     library_response,
@@ -90,6 +96,8 @@ def poll_once() -> dict[str, int]:
             "cleanup_collector": 0,
             "cleanup": 0,
             "traces": 0,
+            "decision_collector": 0,
+            "decisions": 0,
             "responsibility": 0,
             "recommendations": 0,
             "timeline": 0,
@@ -140,6 +148,16 @@ def poll_once() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Correlation crashed: %s", exc)
         results["traces"] = 0
+    try:
+        results["decision_collector"] = decision_collector.collect(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Decision collector crashed: %s", exc)
+        results["decision_collector"] = 0
+    try:
+        results["decisions"] = run_decisions(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Decision interpreter crashed: %s", exc)
+        results["decisions"] = 0
     try:
         results["responsibility"] = run_responsibility(config)
     except Exception as exc:  # noqa: BLE001
@@ -290,6 +308,18 @@ async def api_cleanup() -> JSONResponse:
 @app.get("/api/cleanup/{media_id}")
 async def api_cleanup_media(media_id: str) -> JSONResponse:
     return JSONResponse(media_cleanup_response(media_id, db.all_cleanup_events(media_id)))
+
+
+@app.get("/api/decisions")
+async def api_decisions() -> JSONResponse:
+    return JSONResponse(decisions_response(db.all_decision_assessments()))
+
+
+@app.get("/api/decisions/{media_id}")
+async def api_decisions_media(media_id: str) -> JSONResponse:
+    return JSONResponse(
+        media_decision_response(media_id, db.all_decision_assessments(media_id))
+    )
 
 
 @app.get("/api/responsibility")

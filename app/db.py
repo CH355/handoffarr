@@ -141,6 +141,22 @@ def init_db() -> None:
                 evidence_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS decision_assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT,
+                media_id TEXT,
+                media_title TEXT,
+                selected_release TEXT,
+                source_application TEXT,
+                source_indexer TEXT,
+                candidate_count INTEGER,
+                decision_reason TEXT,
+                decision_quality TEXT,
+                confidence TEXT,
+                evidence_json TEXT,
+                observed_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS responsibility_assessments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 assessment_id TEXT,
@@ -178,6 +194,10 @@ def init_db() -> None:
                 ON timeline_events (media_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_timeline_events_timeline
                 ON timeline_events (timeline_id, stage);
+            CREATE INDEX IF NOT EXISTS idx_decision_assessments_media
+                ON decision_assessments (media_id, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_decision_assessments_quality
+                ON decision_assessments (decision_quality, observed_at);
             CREATE INDEX IF NOT EXISTS idx_recommendations_priority
                 ON recommendations (priority, observed_at);
             CREATE INDEX IF NOT EXISTS idx_recommendations_category
@@ -698,6 +718,73 @@ def all_timeline_events(media_id: str | None = None) -> list[dict[str, Any]]:
             event["evidence"] = {}
         events.append(event)
     return events
+
+
+def replace_decision_assessments(assessments: list[dict[str, Any]]) -> None:
+    """Replace the full DecisionAssessment snapshot.
+
+    Decision assessments are derived state for the current operational picture
+    and follow the same delete-and-insert pattern as the other interpreters.
+    """
+    observed_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM decision_assessments")
+        for assessment in assessments:
+            conn.execute(
+                """
+                INSERT INTO decision_assessments
+                    (decision_id, media_id, media_title, selected_release,
+                     source_application, source_indexer, candidate_count,
+                     decision_reason, decision_quality, confidence, evidence_json,
+                     observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment.get("decision_id"),
+                    str(assessment.get("media_id"))
+                    if assessment.get("media_id") is not None
+                    else None,
+                    assessment.get("media_title"),
+                    assessment.get("selected_release"),
+                    assessment.get("source_application"),
+                    assessment.get("source_indexer"),
+                    assessment.get("candidate_count"),
+                    assessment.get("decision_reason"),
+                    assessment.get("decision_quality"),
+                    assessment.get("confidence"),
+                    json.dumps(assessment.get("evidence") or {}, default=str),
+                    assessment.get("observed_at") or observed_default,
+                ),
+            )
+
+
+def all_decision_assessments(media_id: str | None = None) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        if media_id is None:
+            rows = conn.execute(
+                "SELECT * FROM decision_assessments "
+                "ORDER BY observed_at DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM decision_assessments WHERE media_id = ? "
+                "ORDER BY observed_at DESC, id DESC",
+                (str(media_id),),
+            ).fetchall()
+
+    assessments: list[dict[str, Any]] = []
+    for row in rows:
+        assessment = dict(row)
+        raw_evidence = assessment.pop("evidence_json", None)
+        if raw_evidence:
+            try:
+                assessment["evidence"] = json.loads(raw_evidence)
+            except (TypeError, ValueError):
+                assessment["evidence"] = {}
+        else:
+            assessment["evidence"] = {}
+        assessments.append(assessment)
+    return assessments
 
 
 def all_responsibility_assessments() -> list[dict[str, Any]]:
