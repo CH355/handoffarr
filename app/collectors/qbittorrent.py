@@ -147,7 +147,7 @@ def collect(config: Config) -> int:
                     continue
                 try:
                     torrent_hash = t.get("hash")
-                    payload = _normalize_torrent(t)
+                    payload = _normalize_torrent_full(t)
 
                     # Optional: fetch trackers for richer diagnosis context.
                     if torrent_hash and trackers_endpoint:

@@ -242,6 +242,7 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
 
         # --- Match Seerr request by normalized title within time window ---
         seerr_id = None
+        seerr_status = None
         r_time = _parse_time(r_ev.get("observed_at"))
         for s_id, s_ev in seerr_by_id.items():
             s_payload = _parse_payload(s_ev)
@@ -255,6 +256,7 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
                     ) > title_window * 60:
                         continue
                 seerr_id = s_id
+                seerr_status = s_payload.get("status")
                 break
         if seerr_id:
             used_seerr_ids.add(seerr_id)
@@ -280,6 +282,7 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
                 "title": title,
                 "normalized_title": norm_title,
                 "seerr_request_id": seerr_id,
+                "seerr_status": seerr_status,
                 "radarr_history_id": radarr_id,
                 "torrent_hash": q_ev.get("torrent_hash") if q_ev else torrent_hash,
                 "download_id": download_id,
@@ -290,6 +293,7 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
                 "state_classification": states.classify(q_payload.get("state")),
                 "actual_seeds": q_payload.get("seeds"),
                 "actual_peers": q_payload.get("peers"),
+                "dlspeed": q_payload.get("dlspeed"),
                 "match_source": match_source,
                 "match_confidence": match_confidence,
                 "match_reasons": match_reasons,
@@ -309,6 +313,7 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
                     s_payload.get("title") or s_ev.get("title")
                 ),
                 "seerr_request_id": s_id,
+                "seerr_status": s_payload.get("status"),
                 "radarr_history_id": None,
                 "torrent_hash": None,
                 "download_id": None,
@@ -319,6 +324,7 @@ def build_traces(config: Config) -> list[dict[str, Any]]:
                 "state_classification": None,
                 "actual_seeds": None,
                 "actual_peers": None,
+                "dlspeed": None,
                 "match_source": None,
                 "match_confidence": CONFIDENCE_NONE,
                 "match_reasons": ["Seerr request with no matching Radarr grab"],

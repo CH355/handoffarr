@@ -58,14 +58,29 @@
       letter-spacing: 0.03em;
     }
     .empty { color: #9aa0a6; padding: 32px 0; }
+    .top-cards { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
+    .summary-card,
     .queue-card {
       background: #181b21; border: 1px solid #2a2e35; border-radius: 10px;
       padding: 16px 18px; margin-bottom: 24px; max-width: 880px;
     }
+    .summary-card { flex: 1 1 360px; margin-bottom: 0; }
     .queue-card h2 {
       font-size: 14px; margin: 0 0 12px; color: #9aa0a6; font-weight: 600;
       text-transform: uppercase; letter-spacing: 0.04em;
     }
+    .summary-card h2 {
+      font-size: 14px; margin: 0 0 6px; color: #9aa0a6; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .summary-card h3 { font-size: 18px; margin: 0 0 12px; }
+    .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                 gap: 10px 18px; }
+    .card-row { margin-top: 12px; font-size: 13px; color: #c4c8cd; }
+    .card-label { display: block; font-size: 11px; color: #9aa0a6;
+                  text-transform: uppercase; letter-spacing: 0.03em; }
+    .card-value { font-size: 15px; color: #e6e8eb; }
+    .answer { font-size: 13px; color: #c4c8cd; margin-bottom: 10px; }
     .queue-stats { display: flex; flex-wrap: wrap; gap: 22px; align-items: center; }
     .stat { display: flex; flex-direction: column; }
     .stat .num { font-size: 24px; font-weight: 600; line-height: 1.1; }
@@ -87,6 +102,10 @@
   <header>
     <h1>Handoffarr</h1>
     <span class="tagline">See who passed the bad torrent.</span>
+    <nav style="font-size:13px;display:flex;gap:14px;">
+      <a href="/" style="color:#6ea8fe;text-decoration:none;">Dashboard</a>
+      <a href="/timeline" style="color:#6ea8fe;text-decoration:none;">Timeline</a>
+    </nav>
     <div class="actions">
       <button onclick="pollNow()">Poll now</button>
     </div>
@@ -94,6 +113,32 @@
 
   <main>
     {% if config_present %}
+      <div class="top-cards">
+        <section id="responsibility-card" class="summary-card">
+          <h2>Responsibility Summary</h2>
+          <h3>Why is my disk full?</h3>
+          <div class="answer" id="r-answer">Loading responsibility assessmentâ€¦</div>
+          <div class="card-grid">
+            <div><span class="card-label">Diagnosis</span><span class="card-value" id="r-diagnosis">â€”</span></div>
+            <div><span class="card-label">Responsible Domain</span><span class="card-value" id="r-domain">â€”</span></div>
+            <div><span class="card-label">Confidence</span><span class="card-value" id="r-confidence">â€”</span></div>
+            <div><span class="card-label">Impact</span><span class="card-value" id="r-impact">â€”</span></div>
+          </div>
+          <div class="card-row"><span class="card-label">Recommended Action</span><span id="r-action">â€”</span></div>
+        </section>
+
+        <section id="storage-card" class="summary-card">
+          <h2>Storage Health</h2>
+          <div class="queue-stats">
+            <div class="stat"><span class="num" id="s-retained">â€”</span><span class="lbl">Retained</span></div>
+            <div class="stat"><span class="num" id="s-completed">â€”</span><span class="lbl">Completed</span></div>
+            <div class="stat"><span class="num" id="s-free">â€”</span><span class="lbl">Free</span></div>
+            <div class="health"><span class="diag" id="s-health">â€”</span></div>
+          </div>
+          <div class="card-row"><span class="card-label">Top contributor</span><span id="s-top">â€”</span></div>
+        </section>
+      </div>
+
       <section id="queue-card" class="queue-card hidden">
         <h2>qBittorrent queue</h2>
         <div class="queue-stats">
@@ -198,6 +243,77 @@
     const HEALTH_CLASS = {
       ok: 'diag-ok', warn: 'diag-warn', bad: 'diag-bad',
     };
+    const STORAGE_HEALTH_CLASS = {
+      healthy: 'diag-ok', warning: 'diag-warn', critical: 'diag-bad', unknown: 'diag-warn',
+    };
+
+    function formatBytes(value) {
+      if (value === null || value === undefined) return 'â€”';
+      const n = Number(value);
+      if (!Number.isFinite(n)) return 'â€”';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let size = Math.abs(n);
+      let idx = 0;
+      while (size >= 1024 && idx < units.length - 1) {
+        size = size / 1024;
+        idx += 1;
+      }
+      const display = idx >= 3 ? size.toFixed(1) : size.toFixed(0);
+      return (n < 0 ? '-' : '') + display + ' ' + units[idx];
+    }
+
+    function confidenceText(confidence) {
+      if (confidence === 'Certain') return 'Responsibility confirmed';
+      if (confidence === 'High') return 'Very likely responsible';
+      if (confidence === 'Medium') return 'Likely responsible';
+      if (confidence === 'Low') return 'Needs investigation';
+      return confidence || 'â€”';
+    }
+
+    async function loadResponsibilityCard() {
+      const card = document.getElementById('responsibility-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/responsibility');
+        data = await resp.json();
+      } catch (e) { return; }
+      const assessment = (data.assessments || [])[0];
+      if (!assessment) {
+        document.getElementById('r-answer').textContent = 'No storage responsibility assessment yet.';
+        return;
+      }
+      const impact = assessment.impact || {};
+      document.getElementById('r-answer').textContent =
+        `${assessment.diagnosis}. ${assessment.responsible_domain} is ${confidenceText(assessment.confidence).toLowerCase()}.`;
+      document.getElementById('r-diagnosis').textContent = assessment.diagnosis || 'â€”';
+      document.getElementById('r-domain').textContent = assessment.responsible_domain || 'â€”';
+      document.getElementById('r-confidence').textContent = assessment.confidence || 'â€”';
+      document.getElementById('r-impact').textContent =
+        `${formatBytes(impact.retained_bytes)} retained across ${impact.affected_torrents ?? 'â€”'} completed torrents`;
+      document.getElementById('r-action').textContent = assessment.recommended_action || 'â€”';
+    }
+
+    async function loadStorageCard() {
+      const card = document.getElementById('storage-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/storage');
+        data = await resp.json();
+      } catch (e) { return; }
+      const s = data.summary || {};
+      document.getElementById('s-retained').textContent = formatBytes(s.retained_bytes);
+      document.getElementById('s-completed').textContent = s.completed_torrent_count ?? 'â€”';
+      document.getElementById('s-free').textContent = formatBytes(s.free_bytes);
+      const health = document.getElementById('s-health');
+      health.textContent = s.health || 'â€”';
+      health.className = 'diag ' + (STORAGE_HEALTH_CLASS[s.health] || 'diag-warn');
+      const top = (data.retained_torrents || [])[0];
+      document.getElementById('s-top').textContent = top
+        ? `${top.name || top.hash || 'unknown'} (${formatBytes(top.size_bytes)})`
+        : 'â€”';
+    }
 
     async function loadQueueCard() {
       const card = document.getElementById('queue-card');
@@ -230,6 +346,8 @@
       card.classList.remove('hidden');
     }
 
+    loadResponsibilityCard();
+    loadStorageCard();
     loadQueueCard();
   </script>
 </body>

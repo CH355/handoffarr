@@ -8,6 +8,17 @@ app:
   lookback_minutes: 120
   stale_peer_minutes: 10
 
+storage:
+  enabled: false
+  volumes:
+    - label: downloads
+      path: "/downloads"
+  thresholds:
+    critical_free_bytes: 1073741824      # 1 GiB
+    warning_free_bytes: 10737418240      # 10 GiB
+    completed_torrent_count: 25
+    retained_bytes: 107374182400         # 100 GiB
+
 services:
   seerr:
     enabled: true

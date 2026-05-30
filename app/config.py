@@ -30,6 +30,16 @@ DEFAULTS: dict[str, Any] = {
         "healthy_reported_seeds": 20,
         "actual_peers_zero_minutes": 5,
     },
+    "storage": {
+        "enabled": False,
+        "volumes": [],
+        "thresholds": {
+            "critical_free_bytes": 1073741824,
+            "warning_free_bytes": 10737418240,
+            "completed_torrent_count": 25,
+            "retained_bytes": 107374182400,
+        },
+    },
     "matching": {
         "prefer_torrent_hash": True,
         "fallback_to_download_id": True,

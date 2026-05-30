@@ -17,10 +17,15 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from . import db
-from .collectors import qbittorrent, radarr, seerr
+from . import db, timeline
+from .collectors import filesystem, qbittorrent, radarr, seerr
 from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
+from .responsibility import (
+    build_storage_summary,
+    run_responsibility,
+    summarize_assessments,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,12 +54,20 @@ def poll_once() -> dict[str, int]:
     results: dict[str, int] = {}
     if not config.is_present:
         logger.warning("Skipping poll: config not present")
-        return {"seerr": 0, "radarr": 0, "qbittorrent": 0, "traces": 0}
+        return {
+            "seerr": 0,
+            "radarr": 0,
+            "qbittorrent": 0,
+            "filesystem": 0,
+            "traces": 0,
+            "responsibility": 0,
+        }
 
     for name, fn in (
         ("seerr", seerr.collect),
         ("radarr", radarr.collect),
         ("qbittorrent", qbittorrent.collect),
+        ("filesystem", filesystem.collect),
     ):
         try:
             results[name] = fn(config)
@@ -67,6 +80,11 @@ def poll_once() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Correlation crashed: %s", exc)
         results["traces"] = 0
+    try:
+        results["responsibility"] = run_responsibility(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Responsibility crashed: %s", exc)
+        results["responsibility"] = 0
     return results
 
 
@@ -122,14 +140,55 @@ async def dashboard(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/timeline", response_class=HTMLResponse)
+async def timeline_view(request: Request) -> HTMLResponse:
+    config = get_config()
+    traces = db.all_traces() if config.is_present else []
+    view = timeline.build_timeline(traces)
+    return templates.TemplateResponse(
+        "timeline.html",
+        {
+            "request": request,
+            "config_present": config.is_present,
+            "config_path": config.path,
+            "summary": view["summary"],
+            "pipelines": view["pipelines"],
+        },
+    )
+
+
 @app.get("/api/traces")
 async def api_traces() -> JSONResponse:
     return JSONResponse({"traces": db.all_traces()})
 
 
+@app.get("/api/timeline")
+async def api_timeline() -> JSONResponse:
+    return JSONResponse(timeline.build_timeline(db.all_traces()))
+
+
 @app.get("/api/events")
 async def api_events(source: str | None = None, limit: int = 200) -> JSONResponse:
     return JSONResponse({"events": db.recent_events(source=source, limit=limit)})
+
+
+@app.get("/api/storage")
+async def api_storage() -> JSONResponse:
+    return JSONResponse(build_storage_summary(get_config()))
+
+
+@app.get("/api/responsibility")
+async def api_responsibility() -> JSONResponse:
+    assessments = db.all_responsibility_assessments()
+    summary = summarize_assessments(assessments)
+    return JSONResponse(
+        {
+            "assessments": assessments,
+            "top_diagnosis": summary["top_diagnosis"],
+            "top_responsible_domain": summary["top_responsible_domain"],
+            "summary": summary,
+        }
+    )
 
 
 @app.post("/api/poll-now")

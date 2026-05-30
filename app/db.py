@@ -53,6 +53,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT,
                 seerr_request_id TEXT,
+                seerr_status TEXT,
                 radarr_history_id TEXT,
                 torrent_hash TEXT,
                 download_id TEXT,
@@ -62,6 +63,7 @@ def init_db() -> None:
                 qbittorrent_state TEXT,
                 actual_seeds INTEGER,
                 actual_peers INTEGER,
+                dlspeed INTEGER,
                 diagnosis TEXT,
                 updated_at TEXT,
                 match_source TEXT,
@@ -71,10 +73,27 @@ def init_db() -> None:
                 state_classification TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS responsibility_assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id TEXT,
+                lifecycle_stage TEXT,
+                diagnosis TEXT,
+                responsible_domain TEXT,
+                confidence TEXT,
+                evidence_json TEXT,
+                impact_json TEXT,
+                recommended_action TEXT,
+                observed_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
+                ON raw_events (source, event_type, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_hash
                 ON raw_events (torrent_hash);
+            CREATE INDEX IF NOT EXISTS idx_responsibility_assessments_domain
+                ON responsibility_assessments (responsible_domain, observed_at);
             """
         )
         _migrate_handoff_traces(conn)
@@ -90,6 +109,8 @@ _TRACE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("match_reasons", "TEXT"),
     ("normalized_title", "TEXT"),
     ("state_classification", "TEXT"),
+    ("seerr_status", "TEXT"),
+    ("dlspeed", "INTEGER"),
 )
 
 
@@ -175,17 +196,20 @@ def replace_traces(traces: list[dict[str, Any]]) -> None:
             conn.execute(
                 """
                 INSERT INTO handoff_traces
-                    (title, seerr_request_id, radarr_history_id, torrent_hash,
-                     download_id, selected_release, reported_seeds,
+                    (title, seerr_request_id, seerr_status, radarr_history_id,
+                     torrent_hash, download_id, selected_release, reported_seeds,
                      reported_indexer, qbittorrent_state, actual_seeds,
-                     actual_peers, diagnosis, updated_at, match_source,
+                     actual_peers, dlspeed, diagnosis, updated_at, match_source,
                      match_confidence, match_reasons, normalized_title,
                      state_classification)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     t.get("title"),
                     t.get("seerr_request_id"),
+                    str(t.get("seerr_status"))
+                    if t.get("seerr_status") is not None
+                    else None,
                     t.get("radarr_history_id"),
                     t.get("torrent_hash"),
                     t.get("download_id"),
@@ -195,6 +219,7 @@ def replace_traces(traces: list[dict[str, Any]]) -> None:
                     t.get("qbittorrent_state"),
                     t.get("actual_seeds"),
                     t.get("actual_peers"),
+                    t.get("dlspeed"),
                     t.get("diagnosis"),
                     now,
                     t.get("match_source"),
@@ -226,3 +251,61 @@ def all_traces() -> list[dict[str, Any]]:
             trace["match_reasons"] = []
         traces.append(trace)
     return traces
+
+
+def replace_responsibility_assessments(assessments: list[dict[str, Any]]) -> None:
+    """Replace the full responsibility snapshot.
+
+    Responsibility assessments are derived state for the current operational
+    picture, so they follow the same delete-and-insert pattern as handoff traces.
+    """
+    observed_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM responsibility_assessments")
+        for assessment in assessments:
+            conn.execute(
+                """
+                INSERT INTO responsibility_assessments
+                    (assessment_id, lifecycle_stage, diagnosis, responsible_domain,
+                     confidence, evidence_json, impact_json, recommended_action,
+                     observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment.get("assessment_id"),
+                    assessment.get("lifecycle_stage"),
+                    assessment.get("diagnosis"),
+                    assessment.get("responsible_domain"),
+                    assessment.get("confidence"),
+                    json.dumps(assessment.get("evidence") or []),
+                    json.dumps(assessment.get("impact") or {}),
+                    assessment.get("recommended_action"),
+                    assessment.get("observed_at") or observed_default,
+                ),
+            )
+
+
+def all_responsibility_assessments() -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM responsibility_assessments "
+            "ORDER BY observed_at DESC, id DESC"
+        ).fetchall()
+
+    assessments: list[dict[str, Any]] = []
+    for row in rows:
+        assessment = dict(row)
+        for stored_key, public_key, default in (
+            ("evidence_json", "evidence", []),
+            ("impact_json", "impact", {}),
+        ):
+            raw = assessment.pop(stored_key, None)
+            if raw:
+                try:
+                    assessment[public_key] = json.loads(raw)
+                except (TypeError, ValueError):
+                    assessment[public_key] = default
+            else:
+                assessment[public_key] = default
+        assessments.append(assessment)
+    return assessments

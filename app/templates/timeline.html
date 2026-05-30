@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Handoffarr — Lifecycle timeline</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; background: #14161a; color: #e6e8eb;
+    }
+    a { color: #6ea8fe; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header {
+      padding: 18px 24px; border-bottom: 1px solid #2a2e35;
+      display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    }
+    h1 { font-size: 20px; margin: 0; }
+    .tagline { color: #9aa0a6; font-size: 13px; }
+    .nav { font-size: 13px; display: flex; gap: 14px; }
+    .actions { margin-left: auto; }
+    button {
+      background: #2d6cdf; color: #fff; border: 0; padding: 8px 14px;
+      border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    button:hover { background: #3a78ec; }
+    main { padding: 24px; }
+    .notice {
+      background: #3a2f17; border: 1px solid #6b5418; color: #f1d99a;
+      padding: 16px 18px; border-radius: 8px; max-width: 760px;
+    }
+    .notice code { background: #1f2937; padding: 1px 5px; border-radius: 4px; }
+    .empty { color: #9aa0a6; padding: 32px 0; }
+
+    /* Summary card */
+    .summary {
+      background: #181b21; border: 1px solid #2a2e35; border-radius: 10px;
+      padding: 16px 18px; margin-bottom: 18px;
+    }
+    .summary h2 {
+      font-size: 13px; margin: 0 0 14px; color: #9aa0a6; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .summary-stats { display: flex; flex-wrap: wrap; gap: 26px; }
+    .stat { display: flex; flex-direction: column; }
+    .stat .num { font-size: 26px; font-weight: 600; line-height: 1.1; }
+    .stat .lbl { font-size: 11px; color: #9aa0a6; text-transform: uppercase;
+                 letter-spacing: 0.03em; margin-top: 2px; }
+    .num.ok { color: #7ee2a8; }
+    .num.bad { color: #f1a3a3; }
+    .num.warn { color: #f1d99a; }
+    .num.muted { color: #9aa0a6; }
+
+    /* Filters */
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+    .filter {
+      background: #1b1e24; color: #c4c8cd; border: 1px solid #2a2e35;
+      padding: 6px 12px; border-radius: 16px; cursor: pointer; font-size: 12px;
+    }
+    .filter:hover { border-color: #3a4250; }
+    .filter.active { background: #2d6cdf; color: #fff; border-color: #2d6cdf; }
+    .filter-count { opacity: 0.7; margin-left: 4px; }
+
+    /* Pipeline card */
+    .pipeline {
+      background: #181b21; border: 1px solid #2a2e35; border-radius: 10px;
+      padding: 14px 16px; margin-bottom: 14px;
+    }
+    .pipeline.left-bad { border-left: 3px solid #d05a5a; }
+    .pipeline.left-ok { border-left: 3px solid #3a8f5f; }
+    .pipeline.left-warn { border-left: 3px solid #b9923a; }
+    .pipeline-head {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .pipeline-title { font-size: 15px; font-weight: 600; }
+    .pipeline-time { color: #6b7280; font-size: 12px; margin-left: auto; }
+
+    .badge {
+      font-size: 11px; padding: 2px 9px; border-radius: 12px;
+      display: inline-block; white-space: nowrap; text-transform: uppercase;
+      letter-spacing: 0.03em; font-weight: 600;
+    }
+    .badge-healthy { background: #11331f; color: #7ee2a8; }
+    .badge-completed { background: #12303a; color: #7ed0e2; }
+    .badge-queued { background: #3a2f17; color: #f1d99a; }
+    .badge-stalled { background: #3a1b1b; color: #f1a3a3; }
+    .badge-degraded { background: #3a1b1b; color: #f1a3a3; }
+    .chip {
+      font-size: 11px; padding: 2px 8px; border-radius: 10px;
+      background: #20242c; color: #9aa0a6; border: 1px solid #2a2e35;
+    }
+    .chip.low { background: #2e2713; color: #f1d99a; border-color: #5a4a1c; }
+    .chip.miss { background: #261f2e; color: #cdb6e6; border-color: #4a3a5a; }
+
+    .degradation {
+      font-size: 12px; padding: 6px 10px; border-radius: 6px; margin: 0 0 12px;
+      background: #2a1414; color: #f1a3a3; border: 1px solid #4a2222;
+      display: inline-block;
+    }
+    .degradation.none {
+      background: #11331f; color: #7ee2a8; border-color: #1f4a30;
+    }
+
+    /* Lifecycle stepper */
+    .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 4px; }
+    .stage {
+      flex: 1 1 130px; min-width: 130px; border: 1px solid #262a31;
+      border-radius: 8px; padding: 8px 10px; background: #14161a;
+    }
+    .stage-head {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+    }
+    .stage-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+      background: #6b7280;
+    }
+    .stage-name {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: #9aa0a6; font-weight: 600;
+    }
+    .stage-body { font-size: 12px; color: #c4c8cd; line-height: 1.5; }
+    .stage-body .k { color: #6b7280; }
+    .stage-body .v { color: #e6e8eb; }
+    .stage-na .stage-body { color: #4b5563; }
+    .stage-ok .stage-dot { background: #7ee2a8; }
+    .stage-ok { border-color: #1f4a30; }
+    .stage-bad .stage-dot { background: #f1a3a3; }
+    .stage-bad { border-color: #4a2222; background: #1c1416; }
+    .stage-warn .stage-dot { background: #f1d99a; }
+    .stage-warn { border-color: #4a3f1c; }
+    .stage-pending .stage-dot { background: #3a4250; }
+    .stage-pending { border-style: dashed; }
+    .arrow { align-self: center; color: #3a4250; font-size: 14px; padding: 0 1px; }
+
+    /* Why block */
+    .why { margin-top: 10px; }
+    .why summary {
+      cursor: pointer; font-size: 12px; color: #9aa0a6; user-select: none;
+      padding: 4px 0;
+    }
+    .why summary:hover { color: #c4c8cd; }
+    .why-grid { margin-top: 8px; display: grid; gap: 12px; }
+    .why-sec h4 {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: #9aa0a6; margin: 0 0 6px; font-weight: 600;
+    }
+    .why-sec ul { margin: 0; padding-left: 18px; font-size: 12px; color: #c4c8cd; }
+    .why-sec li { padding: 2px 0; }
+    .why-sec .muted { color: #6b7280; padding-left: 0; list-style: none; }
+    .load-live {
+      background: #20242c; color: #c4c8cd; border: 1px solid #2a2e35;
+      padding: 5px 10px; border-radius: 6px; font-size: 12px;
+    }
+    .load-live:hover { background: #262b34; }
+    .sev-critical { color: #f1a3a3; }
+    .sev-warning { color: #f1d99a; }
+    .sev-info { color: #9aa0a6; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Handoffarr</h1>
+    <span class="tagline">Follow the lifecycle. Find where the handoff degraded.</span>
+    <nav class="nav">
+      <a href="/">Dashboard</a>
+      <a href="/timeline">Timeline</a>
+    </nav>
+    <div class="actions">
+      <button onclick="pollNow()">Poll now</button>
+    </div>
+  </header>
+
+  <main>
+    {% if not config_present %}
+      <div class="notice">
+        <strong>Configuration not found.</strong>
+        <p>
+          Handoffarr could not find a config file at
+          <code>{{ config_path }}</code>.
+        </p>
+        <p>
+          Copy <code>config.example.yaml</code> to
+          <code>config/config.yaml</code>, add your API keys locally, then
+          restart the container. See the README for details.
+        </p>
+      </div>
+    {% else %}
+      <section class="summary">
+        <h2>Lifecycle summary</h2>
+        <div class="summary-stats">
+          <div class="stat"><span class="num">{{ summary.total_requests }}</span><span class="lbl">Total requests</span></div>
+          <div class="stat"><span class="num ok">{{ summary.healthy }}</span><span class="lbl">Healthy pipelines</span></div>
+          <div class="stat"><span class="num bad">{{ summary.degraded }}</span><span class="lbl">Degraded pipelines</span></div>
+          <div class="stat"><span class="num bad">{{ summary.stalled_runtime }}</span><span class="lbl">Stalled runtime</span></div>
+          <div class="stat"><span class="num warn">{{ summary.low_confidence }}</span><span class="lbl">Low-confidence correlations</span></div>
+          <div class="stat"><span class="num muted">{{ summary.missing_telemetry }}</span><span class="lbl">Missing telemetry</span></div>
+        </div>
+      </section>
+
+      {% if pipelines|length == 0 %}
+        <div class="empty">
+          No handoff traces yet. The poller runs on an interval — give it a
+          moment, or click <em>Poll now</em>.
+        </div>
+      {% else %}
+        <div class="filters" id="filters">
+          <span class="filter active" data-filter="all">All<span class="filter-count">{{ pipelines|length }}</span></span>
+          <span class="filter" data-filter="problematic">Problematic<span class="filter-count">{{ summary.degraded }}</span></span>
+          <span class="filter" data-filter="low_confidence">Low-confidence<span class="filter-count">{{ summary.low_confidence }}</span></span>
+          <span class="filter" data-filter="stalled">Stalled<span class="filter-count">{{ summary.stalled_runtime }}</span></span>
+          <span class="filter" data-filter="queued">Queued<span class="filter-count">{{ pipelines|selectattr('flags.queued')|list|length }}</span></span>
+          <span class="filter" data-filter="completed">Completed<span class="filter-count">{{ pipelines|selectattr('flags.completed')|list|length }}</span></span>
+          <span class="filter" data-filter="missing_telemetry">Missing telemetry<span class="filter-count">{{ summary.missing_telemetry }}</span></span>
+        </div>
+
+        <div id="pipelines">
+          {% for p in pipelines %}
+            {% set st = p.stages %}
+            {% if p.degradation.degraded %}{% set side = "left-bad" %}
+            {% elif p.status == "completed" or p.status == "healthy" %}{% set side = "left-ok" %}
+            {% else %}{% set side = "left-warn" %}{% endif %}
+            <article class="pipeline {{ side }}"
+                     data-problematic="{{ 'y' if p.flags.problematic else 'n' }}"
+                     data-low_confidence="{{ 'y' if p.flags.low_confidence else 'n' }}"
+                     data-stalled="{{ 'y' if p.flags.stalled else 'n' }}"
+                     data-queued="{{ 'y' if p.flags.queued else 'n' }}"
+                     data-completed="{{ 'y' if p.flags.completed else 'n' }}"
+                     data-missing_telemetry="{{ 'y' if p.flags.missing_telemetry else 'n' }}">
+              <div class="pipeline-head">
+                <span class="pipeline-title">{{ p.title }}</span>
+                <span class="badge badge-{{ p.status }}">{{ p.status }}</span>
+                {% if p.flags.low_confidence %}<span class="chip low">low-confidence correlation</span>{% endif %}
+                {% if p.flags.missing_telemetry %}<span class="chip miss">missing telemetry</span>{% endif %}
+                <span class="pipeline-time">{{ p.updated_at or "—" }}</span>
+              </div>
+
+              {% if p.degradation.degraded %}
+                <div class="degradation">⚠ {{ p.degradation.label }}</div>
+              {% else %}
+                <div class="degradation none">✓ no degradation detected</div>
+              {% endif %}
+
+              <div class="flow">
+                <div class="stage stage-{{ st.request.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Request</span></div>
+                  <div class="stage-body">
+                    {% if st.request.present %}
+                      <div><span class="k">id</span> <span class="v">#{{ st.request.request_id }}</span></div>
+                      <div><span class="k">status</span> <span class="v">{{ st.request.request_status if st.request.request_status is not none else "—" }}</span></div>
+                    {% else %}—{% endif %}
+                  </div>
+                </div>
+                <span class="arrow">→</span>
+
+                <div class="stage stage-{{ st.decision.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Decision</span></div>
+                  <div class="stage-body">
+                    {% if st.decision.present %}
+                      <div><span class="k">release</span> <span class="v">{{ st.decision.selected_release or "—" }}</span></div>
+                      <div><span class="k">seeds</span> <span class="v">{{ st.decision.reported_seeds if st.decision.reported_seeds is not none else "—" }}</span></div>
+                      <div><span class="k">indexer</span> <span class="v">{{ st.decision.indexer or "—" }}</span></div>
+                    {% else %}—{% endif %}
+                  </div>
+                </div>
+                <span class="arrow">→</span>
+
+                <div class="stage stage-{{ st.handoff.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Handoff</span></div>
+                  <div class="stage-body">
+                    {% if st.handoff.present %}
+                      <div><span class="k">match</span> <span class="v">{{ st.handoff.match_source }}</span></div>
+                      <div><span class="k">conf</span> <span class="v">{{ '%.2f'|format(st.handoff.match_confidence) if st.handoff.match_confidence is not none else "—" }}</span></div>
+                    {% else %}<span class="k">no qBittorrent match</span>{% endif %}
+                  </div>
+                </div>
+                <span class="arrow">→</span>
+
+                <div class="stage stage-{{ st.queueing.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Queueing</span></div>
+                  <div class="stage-body">
+                    {% if st.queueing.present %}
+                      <div><span class="k">state</span> <span class="v">{{ st.queueing.qbittorrent_state or "—" }}</span></div>
+                      <div><span class="k">queued</span> <span class="v">{{ "yes" if st.queueing.queued else "no" }}</span></div>
+                    {% else %}—{% endif %}
+                  </div>
+                </div>
+                <span class="arrow">→</span>
+
+                <div class="stage stage-{{ st.runtime.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Runtime</span></div>
+                  <div class="stage-body">
+                    {% if st.runtime.present %}
+                      <div><span class="k">class</span> <span class="v">{{ st.runtime.state_classification or "—" }}</span></div>
+                      <div><span class="k">peers/seeds</span> <span class="v">{{ st.runtime.peers if st.runtime.peers is not none else "—" }}/{{ st.runtime.seeds if st.runtime.seeds is not none else "—" }}</span></div>
+                      <div><span class="k">dlspeed</span> <span class="v">{{ st.runtime.dlspeed if st.runtime.dlspeed is not none else "—" }}</span></div>
+                    {% else %}—{% endif %}
+                  </div>
+                </div>
+                <span class="arrow">→</span>
+
+                <div class="stage stage-{{ st.diagnosis.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Diagnosis</span></div>
+                  <div class="stage-body">
+                    <div class="v">{{ st.diagnosis.diagnosis or "—" }}</div>
+                  </div>
+                </div>
+                <span class="arrow">→</span>
+
+                <div class="stage stage-{{ st.outcome.status }}">
+                  <div class="stage-head"><span class="stage-dot"></span><span class="stage-name">Outcome</span></div>
+                  <div class="stage-body">
+                    <div class="v">{{ st.outcome.label }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <details class="why">
+                <summary>Why this diagnosis happened</summary>
+                <div class="why-grid">
+                  <div class="why-sec">
+                    <h4>Match reasons</h4>
+                    {% if p.why.match_reasons %}
+                      <ul>
+                        {% for r in p.why.match_reasons %}<li>{{ r }}</li>{% endfor %}
+                      </ul>
+                    {% else %}
+                      <ul><li class="muted">No match reasons recorded.</li></ul>
+                    {% endif %}
+                  </div>
+                  <div class="why-sec live-findings"
+                       data-hash="{{ p.why.torrent_hash or '' }}">
+                    <h4>Tracker / runtime / queue findings</h4>
+                    {% if p.why.torrent_hash %}
+                      <button class="load-live" type="button"
+                              onclick="loadLive(this)">Load live findings</button>
+                      <div class="live-output"></div>
+                    {% else %}
+                      <ul><li class="muted">No qBittorrent torrent to inspect — runtime, tracker and queue findings are unavailable for this item.</li></ul>
+                    {% endif %}
+                  </div>
+                </div>
+              </details>
+            </article>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endif %}
+  </main>
+
+  <script>
+    async function pollNow() {
+      const btn = document.querySelector('.actions button');
+      btn.disabled = true; btn.textContent = 'Polling…';
+      try { await fetch('/api/poll-now', { method: 'POST' }); }
+      catch (e) { /* ignore */ }
+      location.reload();
+    }
+
+    // --- Filters -------------------------------------------------------
+    const filters = document.getElementById('filters');
+    if (filters) {
+      filters.addEventListener('click', (e) => {
+        const el = e.target.closest('.filter');
+        if (!el) return;
+        filters.querySelectorAll('.filter').forEach(f => f.classList.remove('active'));
+        el.classList.add('active');
+        const key = el.dataset.filter;
+        document.querySelectorAll('#pipelines .pipeline').forEach(card => {
+          const show = key === 'all' || card.dataset[key] === 'y';
+          card.classList.toggle('hidden', !show);
+        });
+      });
+    }
+
+    // --- Lazy live findings from the existing debug interpreters --------
+    // /api/debug/torrent/{hash} -> per-torrent runtime + tracker findings.
+    // /api/debug/queue          -> fleet queue findings (fetched once).
+    let queueFindingsPromise = null;
+    function getQueueFindings() {
+      if (!queueFindingsPromise) {
+        queueFindingsPromise = fetch('/api/debug/queue')
+          .then(r => r.json()).catch(() => null);
+      }
+      return queueFindingsPromise;
+    }
+
+    function list(items, empty) {
+      if (!items || !items.length) {
+        return '<ul><li class="muted">' + empty + '</li></ul>';
+      }
+      return '<ul>' + items.map(i => '<li>' + i + '</li>').join('') + '</ul>';
+    }
+    function esc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    async function loadLive(btn) {
+      const sec = btn.closest('.live-findings');
+      const hash = sec.dataset.hash;
+      const out = sec.querySelector('.live-output');
+      btn.disabled = true; btn.textContent = 'Loading…';
+
+      let tr = null, q = null;
+      try { tr = await (await fetch('/api/debug/torrent/' + encodeURIComponent(hash))).json(); }
+      catch (e) { /* ignore */ }
+      try { q = await getQueueFindings(); } catch (e) { /* ignore */ }
+
+      let html = '';
+
+      // Runtime findings (per-torrent diagnosis reasons from the interpreter).
+      const reasons = (tr && tr.ok && tr.diagnosis_reasons) || [];
+      html += '<h4>Runtime findings</h4>' +
+        list(reasons.map(esc), 'No runtime findings reported.');
+
+      // Tracker findings (per-torrent tracker states from the interpreter).
+      let trackers = [];
+      if (tr && tr.ok && tr.tracker_states) {
+        trackers = tr.tracker_states
+          .filter(t => t.url && !String(t.url).startsWith('**'))
+          .map(t => esc(t.status_label) + ' — ' + esc(t.url) +
+            (t.msg ? ' (' + esc(t.msg) + ')' : ''));
+      }
+      html += '<h4>Tracker findings</h4>' +
+        list(trackers, 'No tracker findings reported.');
+
+      // Queue findings (fleet-wide queue diagnosis from the interpreter).
+      let qf = [];
+      if (q && q.ok && q.findings) {
+        qf = q.findings.map(f =>
+          '<span class="sev-' + esc(f.severity) + '">' + esc(f.title) +
+          '</span> — ' + esc(f.detail));
+      }
+      html += '<h4>Queue findings (fleet)</h4>' +
+        list(qf, 'No queue findings reported.');
+
+      out.innerHTML = html;
+      btn.classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
