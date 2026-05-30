@@ -41,6 +41,18 @@ def _normalize_title(title: str | None) -> str:
     return " ".join(w for w in _WORD_RE.findall(title.lower()) if w not in noise)
 
 
+def _titles_related(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_words = set(left.split())
+    right_words = set(right.split())
+    smaller = left_words if len(left_words) <= len(right_words) else right_words
+    larger = right_words if smaller is left_words else left_words
+    return len(smaller) >= 2 and smaller.issubset(larger)
+
+
 def _latest_by(events: list[dict[str, Any]], key_fn) -> list[dict[str, Any]]:
     seen: set[str] = set()
     latest: list[dict[str, Any]] = []
@@ -120,15 +132,18 @@ def build_import_events(config: Config) -> list[dict[str, Any]]:
         for event in _latest_by(import_observations, lambda e: e.get("external_id"))
     ]
 
-    hashes_with_import = {
-        str((event.get("evidence") or {}).get("torrent_hash")).lower()
-        for event in import_events
-        if (event.get("evidence") or {}).get("torrent_hash")
-    }
-    titles_with_import = {
+    hashes_with_import: set[str] = set()
+    for event in import_events:
+        evidence = event.get("evidence") or {}
+        for key in ("torrent_hash", "download_id"):
+            value = evidence.get(key)
+            if value:
+                hashes_with_import.add(str(value).lower())
+
+    titles_with_import = [
         _normalize_title(event.get("media_title") or event.get("source_path"))
         for event in import_events
-    }
+    ]
 
     qbit_events = db.events_for_source_since("qbittorrent", since)
     for event in _latest_by(qbit_events, lambda e: e.get("torrent_hash")):
@@ -137,7 +152,9 @@ def build_import_events(config: Config) -> list[dict[str, Any]]:
             continue
         torrent_hash = str(event.get("torrent_hash") or payload.get("hash") or "").lower()
         normalized_title = _normalize_title(payload.get("name") or event.get("title"))
-        if torrent_hash in hashes_with_import or normalized_title in titles_with_import:
+        if torrent_hash in hashes_with_import or any(
+            _titles_related(normalized_title, title) for title in titles_with_import
+        ):
             continue
         media_id = torrent_hash or normalized_title or str(event.get("id"))
         import_events.append(

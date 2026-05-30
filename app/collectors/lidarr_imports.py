@@ -13,15 +13,25 @@ import httpx
 
 from .. import db
 from ..config import Config
+from .import_history import (
+    IMPORT_FAILURE_EVENTS,
+    IMPORT_SUCCESS_EVENTS,
+    canonical_event_type,
+    discard_reason,
+    import_status_for_event,
+    nested_path,
+)
 
 logger = logging.getLogger("handoffarr.collectors.lidarr_imports")
 
 SOURCE = "lidarr"
 MEDIA_TYPE = "music"
-SUCCESS_EVENT_HINTS = ("downloadfolderimported", "trackfileimported", "albumimported")
-FAILURE_EVENT_HINTS = ("importfailed", "downloadfailed")
+SUCCESS_EVENT_HINTS = tuple(
+    IMPORT_SUCCESS_EVENTS | {"trackfileimported", "albumimported"}
+)
+FAILURE_EVENT_HINTS = tuple(IMPORT_FAILURE_EVENTS)
 PATH_KEYS = ("droppedPath", "droppedRelPath", "sourcePath", "downloadPath", "path")
-DESTINATION_KEYS = ("importedPath", "destinationPath", "trackFilePath")
+DESTINATION_KEYS = ("importedPath", "destinationPath", "trackFilePath", "filePath")
 HASH_KEYS = ("torrentInfoHash", "torrentHash", "downloadHash")
 
 
@@ -54,17 +64,14 @@ def _media(record: dict[str, Any]) -> tuple[Any, str | None]:
 
 
 def _file_path(record: dict[str, Any]) -> str | None:
-    track_file = record.get("trackFile")
-    if isinstance(track_file, dict) and track_file.get("path"):
-        return str(track_file["path"])
-    return None
+    return nested_path(record, ("trackFile", "file"))
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     data = _data(record)
-    event_type = str(record.get("eventType") or "").lower()
+    event_type = canonical_event_type(record.get("eventType"))
     media_id, media_title = _media(record)
-    status = "Import Success" if any(h in event_type for h in SUCCESS_EVENT_HINTS) else "Import Failed"
+    status = import_status_for_event(event_type) or "Import Failed"
     return {
         "import_id": record.get("id"),
         "source_application": "Lidarr",
@@ -117,8 +124,7 @@ def collect(config: Config) -> int:
 
     stored = 0
     for record in records:
-        event_type = str(record.get("eventType") or "").lower()
-        if not any(h in event_type for h in SUCCESS_EVENT_HINTS + FAILURE_EVENT_HINTS):
+        if discard_reason(record):
             continue
         norm = normalize_record(record)
         db.insert_raw_event(

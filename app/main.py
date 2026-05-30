@@ -39,6 +39,7 @@ from .decision import (
     run_decisions,
 )
 from .imports import imports_response, media_import_response, run_import_visibility
+from .import_debug import inspect_imports
 from .library import (
     library_response,
     media_library_response,
@@ -476,3 +477,8 @@ async def debug_library() -> JSONResponse:
     return JSONResponse(
         await asyncio.to_thread(library_collector.inspect, get_config())
     )
+
+
+@app.get("/api/debug/imports")
+async def debug_imports() -> JSONResponse:
+    return JSONResponse(await asyncio.to_thread(inspect_imports, get_config()))
