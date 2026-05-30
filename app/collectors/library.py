@@ -51,7 +51,15 @@ def _configured_roots(config: Config) -> list[dict[str, Any]]:
     roots = library.get("roots") or library.get("root_folders") or []
     if not isinstance(roots, list):
         return []
-    return [root for root in roots if isinstance(root, dict) and root.get("path")]
+    normalized: list[dict[str, Any]] = []
+    for root in roots:
+        if isinstance(root, str):
+            path = root.strip()
+            if path:
+                normalized.append({"path": path})
+        elif isinstance(root, dict) and root.get("path"):
+            normalized.append(root)
+    return normalized
 
 
 def _normalize_prefix(value: Any) -> str:
