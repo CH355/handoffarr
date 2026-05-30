@@ -54,6 +54,60 @@ def _configured_roots(config: Config) -> list[dict[str, Any]]:
     return [root for root in roots if isinstance(root, dict) and root.get("path")]
 
 
+def _normalize_prefix(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.rstrip("/\\")
+
+
+def _collect_mappings(raw: Any) -> list[tuple[str, str]]:
+    mappings: list[tuple[str, str]] = []
+    if not isinstance(raw, list):
+        return mappings
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        src = _normalize_prefix(entry.get("from") or entry.get("source") or entry.get("container"))
+        dst = _normalize_prefix(entry.get("to") or entry.get("target") or entry.get("host"))
+        if src and dst:
+            mappings.append((src, dst))
+    # Longest source prefix first so nested mappings win over shallow ones.
+    mappings.sort(key=lambda pair: len(pair[0]), reverse=True)
+    return mappings
+
+
+def _path_mappings(config: Config, source_application: str | None) -> list[tuple[str, str]]:
+    library = config.section("library")
+    mappings = _collect_mappings(library.get("path_mappings"))
+    for service_name in ("radarr", "sonarr", "lidarr"):
+        if source_application and service_name != source_application.lower():
+            continue
+        mappings.extend(_collect_mappings(config.service(service_name).get("path_mappings")))
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str]] = []
+    for pair in mappings:
+        if pair in seen:
+            continue
+        seen.add(pair)
+        unique.append(pair)
+    unique.sort(key=lambda pair: len(pair[0]), reverse=True)
+    return unique
+
+
+def _apply_mappings(path: str, mappings: list[tuple[str, str]]) -> tuple[str, tuple[str, str] | None]:
+    if not path:
+        return path, None
+    normalized = path.replace("\\", "/")
+    for src, dst in mappings:
+        src_norm = src.replace("\\", "/")
+        if normalized == src_norm or normalized.startswith(src_norm + "/"):
+            remainder = normalized[len(src_norm):]
+            mapped = dst.rstrip("/\\") + remainder
+            return mapped, (src, dst)
+    return path, None
+
+
 def _is_under_root(path: str, roots: list[dict[str, Any]]) -> bool:
     if not roots:
         return True
@@ -118,15 +172,25 @@ def _artifact_from_import(
     roots: list[dict[str, Any]],
     observed_at: str,
     max_entries: int,
+    mappings: list[tuple[str, str]],
 ) -> dict[str, Any]:
     media_id = str(import_event.get("media_id") or import_event.get("import_id") or "")
     title = import_event.get("media_title")
     destination = import_event.get("destination_path")
-    path = os.path.abspath(str(destination)) if destination else None
-    path_source = "import_destination_path" if path else None
+    raw_path = str(destination) if destination else None
+    mapping_used: tuple[str, str] | None = None
+    if raw_path:
+        mapped, mapping_used = _apply_mappings(raw_path, mappings)
+        path = os.path.abspath(mapped)
+        path_source = (
+            "import_destination_path_mapped" if mapping_used else "import_destination_path"
+        )
+    else:
+        path = None
+        path_source = None
     search_note = None
 
-    if path and not _is_under_root(path, roots):
+    if path and not mapping_used and not _is_under_root(path, roots):
         search_note = "destination path is outside configured library roots"
     if not path:
         path, search_note = _find_title_path(title, roots, max_entries)
@@ -148,6 +212,9 @@ def _artifact_from_import(
             else "No library path could be determined."
         ),
     }
+    if mapping_used:
+        evidence["path_mapping"] = {"from": mapping_used[0], "to": mapping_used[1]}
+        evidence["destination_path"] = raw_path
     if search_note:
         evidence["note"] = search_note
 
@@ -178,7 +245,10 @@ def collect(config: Config) -> int:
     stored = 0
 
     for import_event in db.all_import_events():
-        artifact = _artifact_from_import(import_event, roots, observed_at, max_entries)
+        mappings = _path_mappings(config, import_event.get("source_application"))
+        artifact = _artifact_from_import(
+            import_event, roots, observed_at, max_entries, mappings
+        )
         db.insert_raw_event(
             source=SOURCE,
             event_type="artifact",
@@ -200,7 +270,13 @@ def inspect(config: Config) -> dict[str, Any]:
     observed_at = _utcnow()
     max_entries = int(config.section("library").get("max_scan_entries", 5000))
     artifacts = [
-        _artifact_from_import(import_event, roots, observed_at, max_entries)
+        _artifact_from_import(
+            import_event,
+            roots,
+            observed_at,
+            max_entries,
+            _path_mappings(config, import_event.get("source_application")),
+        )
         for import_event in db.all_import_events()
     ]
     return {

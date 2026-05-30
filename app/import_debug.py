@@ -9,7 +9,10 @@ from .collectors.import_history import (
     IMPORT_FAILURE_EVENTS,
     IMPORT_SUCCESS_EVENTS,
     KNOWN_NON_IMPORT_EVENTS,
-    discard_reason,
+    canonical_event_type,
+    classify_record,
+    has_import_artifacts,
+    resolve_event_type,
 )
 from .config import Config
 
@@ -33,15 +36,20 @@ def _service_debug(config: Config, name: str, collector: Any) -> dict[str, Any]:
     discarded: list[dict[str, Any]] = []
 
     for record in records:
-        reason = discard_reason(record)
-        if reason:
+        status, basis = classify_record(record, name)
+        resolved = resolve_event_type(record, name)
+        canonical = canonical_event_type(resolved)
+        if status is None:
             discarded.append(
                 {
                     "id": record.get("id"),
                     "eventType": record.get("eventType"),
+                    "resolved_event_type": resolved,
+                    "canonical_event_type": canonical,
                     "sourceTitle": record.get("sourceTitle"),
                     "date": record.get("date"),
-                    "discard_reason": reason,
+                    "discard_reason": basis,
+                    "has_import_artifacts": has_import_artifacts(record),
                     "data_keys": sorted((record.get("data") or {}).keys())
                     if isinstance(record.get("data"), dict)
                     else [],
@@ -49,7 +57,10 @@ def _service_debug(config: Config, name: str, collector: Any) -> dict[str, Any]:
                 }
             )
             continue
-        recognized.append(collector.normalize_record(record))
+        normalized = collector.normalize_record(record)
+        normalized["classification_basis"] = basis
+        normalized["resolved_event_type"] = resolved
+        recognized.append(normalized)
 
     return {
         "service": name,
@@ -61,6 +72,8 @@ def _service_debug(config: Config, name: str, collector: Any) -> dict[str, Any]:
         "error": error,
         "raw_import_history_records": records,
         "recognized_import_records": recognized,
+        "recognized_count": len(recognized),
+        "discarded_count": len(discarded),
         "discarded_records": discarded,
         "raw_response": raw,
     }

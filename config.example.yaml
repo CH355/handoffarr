@@ -32,6 +32,14 @@ library:
       media_type: music
       path: "/PlexMedia/Music"
   max_scan_entries: 5000
+  # Translate container-side paths reported by Radarr/Sonarr/Lidarr into the
+  # host-visible paths Handoffarr can stat. Longest source prefix wins.
+  # Per-service overrides live under services.<name>.path_mappings.
+  path_mappings:
+    - from: "/movies"
+      to: "/mnt/192.168.55.19/PlexMedia/Movies"
+    - from: "/tv"
+      to: "/mnt/192.168.55.19/PlexMedia/Shows"
 
 cleanup:
   thresholds:
@@ -52,12 +60,20 @@ services:
     base_url: "http://radarr:7878"
     api_key: "PASTE_RADARR_API_KEY_HERE"
     history_endpoint: "/api/v3/history"
+    # Radarr-specific root-folder mappings. Merged with library.path_mappings.
+    path_mappings:
+      - from: "/movies"
+        to: "/mnt/192.168.55.19/PlexMedia/Movies"
 
   sonarr:
     enabled: false
     base_url: "http://sonarr:8989"
     api_key: "PASTE_SONARR_API_KEY_HERE"
     history_endpoint: "/api/v3/history"
+    # Sonarr-specific root-folder mappings. Merged with library.path_mappings.
+    path_mappings:
+      - from: "/tv"
+        to: "/mnt/192.168.55.19/PlexMedia/Shows"
 
   lidarr:
     enabled: false

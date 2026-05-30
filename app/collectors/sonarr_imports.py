@@ -17,9 +17,10 @@ from .import_history import (
     IMPORT_FAILURE_EVENTS,
     IMPORT_SUCCESS_EVENTS,
     canonical_event_type,
+    classify_record,
     discard_reason,
-    import_status_for_event,
     nested_path,
+    resolve_event_type,
 )
 
 logger = logging.getLogger("handoffarr.collectors.sonarr_imports")
@@ -64,9 +65,12 @@ def _file_path(record: dict[str, Any]) -> str | None:
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     data = _data(record)
-    event_type = canonical_event_type(record.get("eventType"))
+    resolved = resolve_event_type(record, SOURCE)
+    event_type = canonical_event_type(resolved)
+    status, _basis = classify_record(record, SOURCE)
+    if status is None:
+        status = "Import Failed"
     media_id, media_title = _media(record)
-    status = import_status_for_event(event_type) or "Import Failed"
     return {
         "import_id": record.get("id"),
         "source_application": "Sonarr",
@@ -119,7 +123,7 @@ def collect(config: Config) -> int:
 
     stored = 0
     for record in records:
-        if discard_reason(record):
+        if discard_reason(record, SOURCE):
             continue
         norm = normalize_record(record)
         db.insert_raw_event(
