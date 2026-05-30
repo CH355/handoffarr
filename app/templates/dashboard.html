@@ -96,6 +96,38 @@
     .sev-warning { color: #f1d99a; }
     .sev-info { color: #9aa0a6; }
     .queue-card.hidden { display: none; }
+    .prio { font-size: 12px; padding: 2px 8px; border-radius: 12px; display: inline-block;
+            white-space: nowrap; font-weight: 600; }
+    .prio-critical { background: #3a1b1b; color: #f1a3a3; }
+    .prio-high { background: #3a2f17; color: #f1d99a; }
+    .prio-medium { background: #1f2937; color: #c4c8cd; }
+    .prio-low { background: #11331f; color: #7ee2a8; }
+    .lifecycle-card { background: #181b21; border: 1px solid #2a2e35;
+                      border-radius: 10px; padding: 16px 18px; margin-bottom: 24px; }
+    .lifecycle-card h2 { font-size: 14px; margin: 0 0 12px; color: #9aa0a6;
+                         font-weight: 600; text-transform: uppercase;
+                         letter-spacing: 0.04em; }
+    .lifecycle-item { padding: 12px 0; border-top: 1px solid #23272e; }
+    .lifecycle-item:first-child { border-top: 0; }
+    .lifecycle-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    .lifecycle-stages { display: flex; flex-wrap: wrap; gap: 6px;
+                        align-items: center; font-size: 12px; }
+    .stage-pill { padding: 2px 8px; border-radius: 10px;
+                  display: inline-flex; align-items: center; gap: 6px;
+                  background: #1f2937; }
+    .stage-pill .label { font-weight: 600; }
+    .stage-pill .status { font-size: 11px; color: #9aa0a6;
+                          text-transform: uppercase; letter-spacing: 0.03em; }
+    .stage-Complete { background: #11331f; color: #7ee2a8; }
+    .stage-Pending { background: #3a2f17; color: #f1d99a; }
+    .stage-Failed { background: #3a1b1b; color: #f1a3a3; }
+    .stage-Unknown { background: #262a31; color: #9aa0a6; }
+    .stage-arrow { color: #6b7280; }
+    .lifecycle-meta { margin-top: 8px; font-size: 12px; color: #c4c8cd;
+                      display: flex; flex-wrap: wrap; gap: 18px; }
+    .lifecycle-meta .lbl { color: #9aa0a6; text-transform: uppercase;
+                           letter-spacing: 0.03em; font-size: 11px;
+                           margin-right: 4px; }
   </style>
 </head>
 <body>
@@ -113,6 +145,45 @@
 
   <main>
     {% if config_present %}
+      <section id="lifecycle-card" class="lifecycle-card hidden">
+        <h2>Lifecycle Timeline</h2>
+        <div class="card-row" id="lifecycle-summary"></div>
+        <div id="lifecycle-body"></div>
+      </section>
+
+      <section id="recommendations-card" class="queue-card hidden">
+        <h2>Recommendations</h2>
+        <div class="card-row" id="rec-summary"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Priority</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Expected impact</th>
+              <th>Confidence</th>
+              <th>Recommended action</th>
+            </tr>
+          </thead>
+          <tbody id="rec-body"></tbody>
+        </table>
+      </section>
+
+      <section id="top-candidates-card" class="queue-card hidden">
+        <h2>Top Cleanup Candidates</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Retained bytes</th>
+              <th>Cleanup status</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="top-candidates-body"></tbody>
+        </table>
+      </section>
+
       <div class="top-cards">
         <section id="responsibility-card" class="summary-card">
           <h2>Responsibility Summary</h2>
@@ -502,6 +573,136 @@
       card.classList.remove('hidden');
     }
 
+    const PRIO_CLASS = {
+      Critical: 'prio-critical', High: 'prio-high',
+      Medium: 'prio-medium', Low: 'prio-low',
+    };
+
+    function formatImpact(impact) {
+      if (!impact) return '—';
+      const parts = [];
+      if (impact.recoverable_bytes) parts.push(formatBytes(impact.recoverable_bytes) + ' recoverable');
+      else if (impact.retained_bytes) parts.push(formatBytes(impact.retained_bytes) + ' retained');
+      if (impact.affected_items) parts.push(impact.affected_items + ' item(s)');
+      if (impact.queued_downloads !== undefined) parts.push(impact.queued_downloads + ' queued');
+      if (impact.stalled_downloads !== undefined) parts.push(impact.stalled_downloads + ' stalled');
+      return parts.length ? parts.join(', ') : '—';
+    }
+
+    async function loadRecommendationsCard() {
+      const card = document.getElementById('recommendations-card');
+      const candidatesCard = document.getElementById('top-candidates-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/recommendations');
+        data = await resp.json();
+      } catch (e) { return; }
+      const recs = data.recommendations || [];
+      const summary = data.summary || {};
+      const summaryEl = document.getElementById('rec-summary');
+      if (summaryEl) {
+        const totalImpact = data.total_expected_impact || {};
+        summaryEl.innerHTML =
+          '<span class="card-label">Summary</span>' +
+          '<span>' + (summary.total || 0) + ' recommendation(s); top priority: ' +
+          (summary.top_priority || '—') + '; ' +
+          formatBytes(totalImpact.recoverable_bytes) + ' potential recovery across ' +
+          (totalImpact.affected_items || 0) + ' item(s).</span>';
+      }
+      const body = document.getElementById('rec-body');
+      body.innerHTML = '';
+      recs.forEach(r => {
+        const tr = document.createElement('tr');
+        const prioCls = PRIO_CLASS[r.priority] || 'prio-low';
+        tr.innerHTML =
+          '<td><span class="prio ' + prioCls + '">' + (r.priority || '—') + '</span></td>' +
+          '<td>' + (r.title || '—') + '</td>' +
+          '<td>' + (r.summary || '—') + '</td>' +
+          '<td>' + formatImpact(r.expected_impact) + '</td>' +
+          '<td>' + (r.confidence || '—') + '</td>' +
+          '<td>' + (r.recommended_action || '—') + '</td>';
+        body.appendChild(tr);
+      });
+      if (recs.length > 0) card.classList.remove('hidden');
+
+      const candidates = data.top_cleanup_candidates || [];
+      const candidatesBody = document.getElementById('top-candidates-body');
+      if (candidatesBody) {
+        candidatesBody.innerHTML = '';
+        candidates.forEach(c => {
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td>' + (c.title || '—') + '</td>' +
+            '<td>' + formatBytes(c.retained_bytes) + '</td>' +
+            '<td>' + (c.cleanup_status || '—') + '</td>' +
+            '<td>' + (c.confidence || '—') + '</td>';
+          candidatesBody.appendChild(tr);
+        });
+        if (candidates.length > 0) candidatesCard.classList.remove('hidden');
+      }
+    }
+
+    const CANONICAL_STAGES = [
+      'Request', 'Decision', 'Queue', 'Runtime', 'Import',
+      'Library', 'Cleanup', 'Responsibility', 'Recommendation', 'Outcome',
+    ];
+
+    async function loadLifecycleCard() {
+      const card = document.getElementById('lifecycle-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/timeline');
+        data = await resp.json();
+      } catch (e) { return; }
+      const timelines = data.recent_timelines || [];
+      const summary = data.summary || {};
+      const summaryEl = document.getElementById('lifecycle-summary');
+      if (summaryEl) {
+        const failedByStage = summary.failed_by_stage || {};
+        const failedParts = Object.entries(failedByStage)
+          .map(([stage, n]) => `${n} ${stage}`)
+          .join(', ');
+        summaryEl.innerHTML =
+          '<span class="card-label">Summary</span>' +
+          '<span>' + (summary.total_timelines || 0) + ' lifecycle(s); ' +
+          (summary.completed || 0) + ' completed; ' +
+          (summary.blocked || 0) + ' blocked' +
+          (failedParts ? '; failed: ' + failedParts : '') + '.</span>';
+      }
+      const body = document.getElementById('lifecycle-body');
+      body.innerHTML = '';
+      timelines.forEach(t => {
+        const stagesByName = {};
+        (t.stages || []).forEach(s => { stagesByName[s.stage] = s; });
+        const pills = CANONICAL_STAGES.map((name, idx) => {
+          const stage = stagesByName[name] || { stage_status: 'Unknown' };
+          const cls = 'stage-pill stage-' + (stage.stage_status || 'Unknown');
+          const arrow = idx < CANONICAL_STAGES.length - 1
+            ? '<span class="stage-arrow">&rarr;</span>' : '';
+          return '<span class="' + cls + '"><span class="label">' + name +
+            '</span><span class="status">' + (stage.stage_status || 'Unknown') +
+            '</span></span>' + arrow;
+        }).join('');
+        const item = document.createElement('div');
+        item.className = 'lifecycle-item';
+        item.innerHTML =
+          '<div class="lifecycle-title">' + (t.media_title || t.media_id || 'unknown') + '</div>' +
+          '<div class="lifecycle-stages">' + pills + '</div>' +
+          '<div class="lifecycle-meta">' +
+            '<span><span class="lbl">Blocked at</span>' + (t.blocked_at || '—') + '</span>' +
+            '<span><span class="lbl">Responsible</span>' + (t.responsible_domain || '—') + '</span>' +
+            '<span><span class="lbl">Recommendation</span>' + (t.recommendation || '—') + '</span>' +
+            '<span><span class="lbl">Outcome</span>' + (t.outcome || '—') + '</span>' +
+          '</div>';
+        body.appendChild(item);
+      });
+      if (timelines.length > 0) card.classList.remove('hidden');
+    }
+
+    loadLifecycleCard();
+    loadRecommendationsCard();
     loadResponsibilityCard();
     loadStorageCard();
     loadImportCard();

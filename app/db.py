@@ -114,6 +114,33 @@ def init_db() -> None:
                 evidence_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recommendation_id TEXT,
+                priority TEXT,
+                category TEXT,
+                title TEXT,
+                summary TEXT,
+                recommended_action TEXT,
+                expected_impact_json TEXT,
+                confidence TEXT,
+                evidence_json TEXT,
+                related_assessment_id TEXT,
+                observed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS timeline_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timeline_id TEXT,
+                media_id TEXT,
+                media_title TEXT,
+                stage TEXT,
+                stage_status TEXT,
+                source TEXT,
+                timestamp TEXT,
+                evidence_json TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS responsibility_assessments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 assessment_id TEXT,
@@ -147,6 +174,14 @@ def init_db() -> None:
                 ON cleanup_events (media_id, cleanup_timestamp);
             CREATE INDEX IF NOT EXISTS idx_cleanup_events_status
                 ON cleanup_events (cleanup_status, cleanup_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_timeline_events_media
+                ON timeline_events (media_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_timeline_events_timeline
+                ON timeline_events (timeline_id, stage);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_priority
+                ON recommendations (priority, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_category
+                ON recommendations (category, observed_at);
             """
         )
         _migrate_handoff_traces(conn)
@@ -547,6 +582,122 @@ def replace_responsibility_assessments(assessments: list[dict[str, Any]]) -> Non
                     assessment.get("observed_at") or observed_default,
                 ),
             )
+
+
+def replace_recommendations(recommendations: list[dict[str, Any]]) -> None:
+    """Replace the full recommendations snapshot.
+
+    Recommendations are derived state for the current operational picture and
+    follow the same delete-and-insert pattern as traces and responsibility
+    assessments.
+    """
+    observed_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM recommendations")
+        for rec in recommendations:
+            conn.execute(
+                """
+                INSERT INTO recommendations
+                    (recommendation_id, priority, category, title, summary,
+                     recommended_action, expected_impact_json, confidence,
+                     evidence_json, related_assessment_id, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rec.get("recommendation_id"),
+                    rec.get("priority"),
+                    rec.get("category"),
+                    rec.get("title"),
+                    rec.get("summary"),
+                    rec.get("recommended_action"),
+                    json.dumps(rec.get("expected_impact") or {}),
+                    rec.get("confidence"),
+                    json.dumps(rec.get("evidence") or {}),
+                    rec.get("related_assessment_id"),
+                    rec.get("observed_at") or observed_default,
+                ),
+            )
+
+
+def all_recommendations() -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recommendations ORDER BY observed_at DESC, id ASC"
+        ).fetchall()
+
+    recommendations: list[dict[str, Any]] = []
+    for row in rows:
+        rec = dict(row)
+        for stored_key, public_key, default in (
+            ("expected_impact_json", "expected_impact", {}),
+            ("evidence_json", "evidence", {}),
+        ):
+            raw = rec.pop(stored_key, None)
+            if raw:
+                try:
+                    rec[public_key] = json.loads(raw)
+                except (TypeError, ValueError):
+                    rec[public_key] = default
+            else:
+                rec[public_key] = default
+        recommendations.append(rec)
+    return recommendations
+
+
+def replace_timeline_events(events: list[dict[str, Any]]) -> None:
+    """Replace the current TimelineEvent snapshot."""
+    observed_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM timeline_events")
+        for event in events:
+            conn.execute(
+                """
+                INSERT INTO timeline_events
+                    (timeline_id, media_id, media_title, stage, stage_status,
+                     source, timestamp, evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.get("timeline_id"),
+                    str(event.get("media_id"))
+                    if event.get("media_id") is not None
+                    else None,
+                    event.get("media_title"),
+                    event.get("stage"),
+                    event.get("stage_status"),
+                    event.get("source"),
+                    event.get("timestamp") or observed_default,
+                    json.dumps(event.get("evidence") or {}, default=str),
+                ),
+            )
+
+
+def all_timeline_events(media_id: str | None = None) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        if media_id is None:
+            rows = conn.execute(
+                "SELECT * FROM timeline_events "
+                "ORDER BY timeline_id ASC, id ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM timeline_events WHERE media_id = ? "
+                "ORDER BY id ASC",
+                (str(media_id),),
+            ).fetchall()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = dict(row)
+        raw_evidence = event.pop("evidence_json", None)
+        if raw_evidence:
+            try:
+                event["evidence"] = json.loads(raw_evidence)
+            except (TypeError, ValueError):
+                event["evidence"] = {}
+        else:
+            event["evidence"] = {}
+        events.append(event)
+    return events
 
 
 def all_responsibility_assessments() -> list[dict[str, Any]]:

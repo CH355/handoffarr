@@ -38,6 +38,11 @@ from .library import (
     media_library_response,
     run_library_visibility,
 )
+from .recommendations import (
+    run_recommendations,
+    summarize_recommendations,
+    top_cleanup_candidates,
+)
 from .responsibility import (
     build_storage_summary,
     run_responsibility,
@@ -86,6 +91,8 @@ def poll_once() -> dict[str, int]:
             "cleanup": 0,
             "traces": 0,
             "responsibility": 0,
+            "recommendations": 0,
+            "timeline": 0,
         }
 
     for name, fn in (
@@ -138,6 +145,16 @@ def poll_once() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Responsibility crashed: %s", exc)
         results["responsibility"] = 0
+    try:
+        results["recommendations"] = run_recommendations(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Recommendations crashed: %s", exc)
+        results["recommendations"] = 0
+    try:
+        results["timeline"] = timeline.run_timeline()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Timeline crashed: %s", exc)
+        results["timeline"] = 0
     return results
 
 
@@ -217,7 +234,20 @@ async def api_traces() -> JSONResponse:
 
 @app.get("/api/timeline")
 async def api_timeline() -> JSONResponse:
+    return JSONResponse(timeline.timeline_response(db.all_timeline_events()))
+
+
+@app.get("/api/timeline/pipelines")
+async def api_timeline_pipelines() -> JSONResponse:
+    """Legacy pipeline projection (kept so the existing /timeline HTML page works)."""
     return JSONResponse(timeline.build_timeline(db.all_traces()))
+
+
+@app.get("/api/timeline/{media_id}")
+async def api_timeline_media(media_id: str) -> JSONResponse:
+    return JSONResponse(
+        timeline.media_timeline_response(media_id, db.all_timeline_events(media_id))
+    )
 
 
 @app.get("/api/events")
@@ -294,6 +324,46 @@ async def api_responsibility_detail(assessment_id: str) -> JSONResponse:
                 }
             )
     return JSONResponse({"error": "assessment not found"}, status_code=404)
+
+
+@app.get("/api/recommendations")
+async def api_recommendations() -> JSONResponse:
+    recommendations = db.all_recommendations()
+    summary = summarize_recommendations(recommendations)
+    return JSONResponse(
+        {
+            "summary": summary,
+            "recommendations": recommendations,
+            "top_priority": summary["top_priority"],
+            "total_expected_impact": {
+                "recoverable_bytes": summary["total_recoverable_bytes"],
+                "affected_items": summary["total_affected_items"],
+            },
+            "top_cleanup_candidates": top_cleanup_candidates(db.all_cleanup_events()),
+        }
+    )
+
+
+@app.get("/api/recommendations/{recommendation_id}")
+async def api_recommendation_detail(recommendation_id: str) -> JSONResponse:
+    for rec in db.all_recommendations():
+        if str(rec.get("recommendation_id")) == recommendation_id:
+            related_assessment = None
+            related_id = rec.get("related_assessment_id")
+            if related_id:
+                for assessment in db.all_responsibility_assessments():
+                    if str(assessment.get("assessment_id")) == str(related_id):
+                        related_assessment = assessment
+                        break
+            return JSONResponse(
+                {
+                    "recommendation": rec,
+                    "evidence": rec.get("evidence") or {},
+                    "expected_impact": rec.get("expected_impact") or {},
+                    "related_assessment": related_assessment,
+                }
+            )
+    return JSONResponse({"error": "recommendation not found"}, status_code=404)
 
 
 @app.post("/api/poll-now")

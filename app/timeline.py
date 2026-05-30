@@ -19,6 +19,8 @@ via the existing ``/api/debug/*`` endpoints, not recomputed here.
 
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime, timezone
 from typing import Any
 
 # Canonical lifecycle stages, in order, from pipeline-model.md. The intermediate
@@ -250,3 +252,434 @@ def build_timeline(traces: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
     return {"summary": summary, "pipelines": pipelines}
+
+
+# --- TimelineEvent interpreter (Phase 6 — Lifecycle View) -----------------
+#
+# A *separate* projection from build_timeline() above: rather than reshaping
+# one trace into pipeline stages, this rebuilds a discrete TimelineEvent log
+# across every persisted lifecycle signal so a single media item can be
+# tracked through Request -> Decision -> Queue -> Runtime -> Import -> Library
+# -> Cleanup -> Responsibility -> Recommendation -> Outcome. Pure interpreter:
+# no collectors, no live calls -- everything is read off persisted snapshots.
+
+CANONICAL_STAGES = (
+    "Request",
+    "Decision",
+    "Queue",
+    "Runtime",
+    "Import",
+    "Library",
+    "Cleanup",
+    "Responsibility",
+    "Recommendation",
+    "Outcome",
+)
+
+STAGE_COMPLETE = "Complete"
+STAGE_FAILED = "Failed"
+STAGE_PENDING = "Pending"
+STAGE_UNKNOWN = "Unknown"
+STAGE_STATUSES = {STAGE_COMPLETE, STAGE_FAILED, STAGE_PENDING, STAGE_UNKNOWN}
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _stable_timeline_id(media_id: str) -> str:
+    digest = hashlib.sha1(str(media_id).encode("utf-8")).hexdigest()[:12]
+    return f"timeline:{digest}"
+
+
+def _trace_media_id(trace: dict[str, Any]) -> str:
+    """Best stable identifier for a trace's lifecycle.
+
+    Prefers normalized title so the same item correlates with import / library
+    / cleanup records (which key by normalized title or media_id). Falls back
+    to torrent hash, radarr id, or seerr id so every trace gets *some* key.
+    """
+    for key in (
+        "normalized_title",
+        "torrent_hash",
+        "radarr_history_id",
+        "seerr_request_id",
+        "title",
+    ):
+        value = trace.get(key)
+        if value:
+            return str(value).strip().lower()
+    return f"trace:{trace.get('id') or trace.get('updated_at') or 'unknown'}"
+
+
+def _runtime_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    cls = (trace.get("state_classification") or "").lower()
+    state = (trace.get("qbittorrent_state") or "").lower()
+    diagnosis = trace.get("diagnosis") or ""
+    evidence = {
+        "qbittorrent_state": trace.get("qbittorrent_state"),
+        "state_classification": trace.get("state_classification"),
+        "diagnosis": diagnosis,
+    }
+    if cls in ("completed", "uploading") or "Completed" in diagnosis or "seeding" in diagnosis:
+        return STAGE_COMPLETE, evidence
+    runtime_failure_terms = (
+        "stalled",
+        "metadata",
+        "tracker",
+        "dead swarm",
+        "choking",
+        "VPN/network",
+        "stale indexer",
+    )
+    if any(term.lower() in diagnosis.lower() for term in runtime_failure_terms):
+        return STAGE_FAILED, evidence
+    if cls in ("queued", "downloading") or state:
+        return STAGE_PENDING, evidence
+    return STAGE_UNKNOWN, evidence
+
+
+def _queue_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    cls = (trace.get("state_classification") or "").lower()
+    state = trace.get("qbittorrent_state")
+    evidence = {
+        "qbittorrent_state": state,
+        "state_classification": trace.get("state_classification"),
+    }
+    if state or cls:
+        return STAGE_COMPLETE, evidence
+    return STAGE_PENDING, evidence
+
+
+def _import_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    status = trace.get("import_status")
+    evidence = {
+        "import_status": status,
+        "imported_by": trace.get("imported_by"),
+        "import_timestamp": trace.get("import_timestamp"),
+    }
+    if status == "Import Success":
+        return STAGE_COMPLETE, evidence
+    if status == "Import Failed":
+        return STAGE_FAILED, evidence
+    if status == "Import Pending":
+        return STAGE_PENDING, evidence
+    return STAGE_UNKNOWN, {"message": "No import event observed."}
+
+
+def _library_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    status = trace.get("library_status")
+    evidence = {
+        "library_status": status,
+        "library_path": trace.get("library_path"),
+        "library_size": trace.get("library_size"),
+    }
+    if status == "Library Present":
+        return STAGE_COMPLETE, evidence
+    if status == "Library Missing":
+        return STAGE_FAILED, evidence
+    if status == "Library Unknown":
+        return STAGE_UNKNOWN, evidence
+    return STAGE_UNKNOWN, {"message": "No library artifact observed."}
+
+
+def _cleanup_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    status = trace.get("cleanup_status")
+    evidence = {
+        "cleanup_status": status,
+        "retained_bytes": trace.get("retained_bytes"),
+        "recoverable_bytes": trace.get("recoverable_bytes"),
+    }
+    if status == "Cleanup Completed":
+        return STAGE_COMPLETE, evidence
+    if status == "Cleanup Pending":
+        return STAGE_PENDING, evidence
+    if status == "Cleanup Failed":
+        return STAGE_FAILED, evidence
+    return STAGE_UNKNOWN, {"message": "No cleanup event observed."}
+
+
+def _request_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    seerr_id = trace.get("seerr_request_id")
+    if seerr_id:
+        return STAGE_COMPLETE, {
+            "seerr_request_id": seerr_id,
+            "seerr_status": trace.get("seerr_status"),
+        }
+    if trace.get("radarr_history_id") or trace.get("torrent_hash"):
+        return STAGE_COMPLETE, {"message": "Lifecycle entry observed without Seerr id."}
+    return STAGE_PENDING, {"message": "No request observed."}
+
+
+def _decision_status(trace: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    has_decision = trace.get("radarr_history_id") is not None
+    has_match = trace.get("match_source") is not None
+    evidence = {
+        "radarr_history_id": trace.get("radarr_history_id"),
+        "match_source": trace.get("match_source"),
+        "match_confidence": trace.get("match_confidence"),
+        "selected_release": trace.get("selected_release"),
+    }
+    if has_decision and has_match:
+        return STAGE_COMPLETE, evidence
+    if has_decision:
+        return STAGE_PENDING, evidence
+    return STAGE_PENDING, {"message": "Awaiting Radarr decision."}
+
+
+def _responsibility_for_trace(
+    assessments: list[dict[str, Any]],
+    *,
+    lifecycle_has_problem: bool,
+) -> tuple[str, dict[str, Any]]:
+    if not assessments:
+        if lifecycle_has_problem:
+            return STAGE_PENDING, {"message": "Lifecycle blocked; no responsibility assessment yet."}
+        return STAGE_COMPLETE, {"message": "Lifecycle healthy; no assessment required."}
+    top = assessments[0]
+    return STAGE_COMPLETE, {
+        "assessment_id": top.get("assessment_id"),
+        "responsible_domain": top.get("responsible_domain"),
+        "diagnosis": top.get("diagnosis"),
+        "confidence": top.get("confidence"),
+        "count": len(assessments),
+    }
+
+
+def _recommendation_for_trace(
+    recommendations: list[dict[str, Any]],
+    *,
+    lifecycle_has_problem: bool,
+) -> tuple[str, dict[str, Any]]:
+    if not recommendations:
+        if lifecycle_has_problem:
+            return STAGE_PENDING, {"message": "Lifecycle blocked; no recommendation yet."}
+        return STAGE_COMPLETE, {"message": "Lifecycle healthy; no recommendation required."}
+    top = recommendations[0]
+    return STAGE_COMPLETE, {
+        "recommendation_id": top.get("recommendation_id"),
+        "title": top.get("title"),
+        "priority": top.get("priority"),
+        "count": len(recommendations),
+    }
+
+
+def _outcome_for_stages(stages: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    # All stages except Outcome itself must be Complete for the lifecycle to
+    # have landed successfully; any Failed or Pending blocks the outcome.
+    blocking = [
+        s for s in stages
+        if s["stage"] != "Outcome" and s["stage_status"] in (STAGE_FAILED, STAGE_PENDING)
+    ]
+    if not blocking:
+        return STAGE_COMPLETE, {"message": "Lifecycle completed successfully."}
+    first = blocking[0]
+    return STAGE_PENDING, {
+        "blocked_at": first["stage"],
+        "blocked_status": first["stage_status"],
+        "message": f"Lifecycle blocked at {first['stage']}.",
+    }
+
+
+def build_timeline_events(
+    *,
+    traces: list[dict[str, Any]],
+    responsibility_assessments: list[dict[str, Any]],
+    recommendations: list[dict[str, Any]],
+    observed_at: str | None = None,
+) -> list[dict[str, Any]]:
+    """Synthesize TimelineEvent records from persisted lifecycle evidence.
+
+    One TimelineEvent per (media, canonical stage). The stage_status field
+    uses only canonical values (Complete / Failed / Pending / Unknown). Source
+    points back to the interpreter that produced the underlying evidence.
+
+    Trace rows already carry import / library / cleanup status thanks to
+    ``correlation.build_traces``; we read those fields directly rather than
+    re-correlating per stage here.
+    """
+    now = observed_at or _utcnow()
+
+    events: list[dict[str, Any]] = []
+
+    for trace in traces:
+        media_id = _trace_media_id(trace)
+        timeline_id = _stable_timeline_id(media_id)
+        media_title = trace.get("title") or media_id
+        updated_at = trace.get("updated_at") or now
+
+        stages: list[dict[str, Any]] = []
+
+        def _add(stage: str, status: str, source: str, evidence: dict[str, Any], ts: str | None = None) -> None:
+            stages.append(
+                {
+                    "timeline_id": timeline_id,
+                    "media_id": media_id,
+                    "media_title": media_title,
+                    "stage": stage,
+                    "stage_status": status if status in STAGE_STATUSES else STAGE_UNKNOWN,
+                    "source": source,
+                    "timestamp": ts or updated_at,
+                    "evidence": evidence,
+                }
+            )
+
+        status, evidence = _request_status(trace)
+        _add("Request", status, "correlation", evidence)
+
+        status, evidence = _decision_status(trace)
+        _add("Decision", status, "correlation", evidence)
+
+        status, evidence = _queue_status(trace)
+        _add("Queue", status, "correlation", evidence)
+
+        status, evidence = _runtime_status(trace)
+        _add("Runtime", status, "correlation", evidence)
+
+        status, evidence = _import_status(trace)
+        _add("Import", status, "imports", evidence, ts=trace.get("import_timestamp") or updated_at)
+
+        status, evidence = _library_status(trace)
+        _add("Library", status, "library", evidence)
+
+        status, evidence = _cleanup_status(trace)
+        _add("Cleanup", status, "cleanup", evidence)
+
+        lifecycle_has_problem = any(
+            s["stage_status"] in (STAGE_FAILED, STAGE_PENDING) for s in stages
+        )
+
+        status, evidence = _responsibility_for_trace(
+            responsibility_assessments, lifecycle_has_problem=lifecycle_has_problem
+        )
+        _add("Responsibility", status, "responsibility", evidence)
+
+        status, evidence = _recommendation_for_trace(
+            recommendations, lifecycle_has_problem=lifecycle_has_problem
+        )
+        _add("Recommendation", status, "recommendations", evidence)
+
+        status, evidence = _outcome_for_stages(stages)
+        _add("Outcome", status, "timeline", evidence)
+
+        events.extend(stages)
+
+    return events
+
+
+def _group_timeline_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group flat TimelineEvent rows into per-media lifecycle records."""
+    by_timeline: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for event in events:
+        timeline_id = event.get("timeline_id") or ""
+        if timeline_id not in by_timeline:
+            order.append(timeline_id)
+            by_timeline[timeline_id] = {
+                "timeline_id": timeline_id,
+                "media_id": event.get("media_id"),
+                "media_title": event.get("media_title"),
+                "stages": [],
+                "blocked_at": None,
+                "responsible_domain": None,
+                "recommendation": None,
+                "outcome": None,
+                "latest_timestamp": event.get("timestamp"),
+            }
+        record = by_timeline[timeline_id]
+        record["stages"].append(
+            {
+                "stage": event.get("stage"),
+                "stage_status": event.get("stage_status"),
+                "source": event.get("source"),
+                "timestamp": event.get("timestamp"),
+                "evidence": event.get("evidence") or {},
+            }
+        )
+        ts = event.get("timestamp") or ""
+        if ts and ts > (record["latest_timestamp"] or ""):
+            record["latest_timestamp"] = ts
+
+    for record in by_timeline.values():
+        # Order stages canonically so the UI always reads left-to-right.
+        rank = {name: idx for idx, name in enumerate(CANONICAL_STAGES)}
+        record["stages"].sort(key=lambda s: rank.get(s.get("stage") or "", 99))
+        blocking = next(
+            (
+                s for s in record["stages"]
+                if s["stage"] != "Outcome"
+                and s["stage_status"] in (STAGE_FAILED, STAGE_PENDING)
+            ),
+            None,
+        )
+        if blocking:
+            record["blocked_at"] = blocking["stage"]
+        for stage in record["stages"]:
+            if stage["stage"] == "Responsibility":
+                record["responsible_domain"] = (stage["evidence"] or {}).get(
+                    "responsible_domain"
+                )
+            elif stage["stage"] == "Recommendation":
+                record["recommendation"] = (stage["evidence"] or {}).get("title")
+            elif stage["stage"] == "Outcome":
+                record["outcome"] = stage["stage_status"]
+    return [by_timeline[tid] for tid in order]
+
+
+def summarize_timeline_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    timelines = _group_timeline_events(events)
+    completed = sum(1 for t in timelines if t.get("outcome") == STAGE_COMPLETE)
+    blocked = sum(1 for t in timelines if t.get("blocked_at"))
+    failed_stage_counts: dict[str, int] = {}
+    for timeline in timelines:
+        for stage in timeline["stages"]:
+            if stage["stage_status"] == STAGE_FAILED:
+                key = stage["stage"]
+                failed_stage_counts[key] = failed_stage_counts.get(key, 0) + 1
+    return {
+        "total_timelines": len(timelines),
+        "completed": completed,
+        "blocked": blocked,
+        "failed_by_stage": failed_stage_counts,
+    }
+
+
+def timeline_response(events: list[dict[str, Any]]) -> dict[str, Any]:
+    timelines = _group_timeline_events(events)
+    recent = sorted(
+        timelines,
+        key=lambda t: t.get("latest_timestamp") or "",
+        reverse=True,
+    )
+    return {
+        "summary": summarize_timeline_events(events),
+        "recent_timelines": recent[:20],
+    }
+
+
+def media_timeline_response(media_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+    matching = [e for e in events if str(e.get("media_id")) == str(media_id)]
+    grouped = _group_timeline_events(matching)
+    timeline = grouped[0] if grouped else None
+    return {
+        "media_id": media_id,
+        "timeline": timeline,
+        "stages": timeline["stages"] if timeline else [],
+        "blocked_at": timeline.get("blocked_at") if timeline else None,
+        "outcome": timeline.get("outcome") if timeline else None,
+    }
+
+
+def run_timeline() -> int:
+    """Rebuild and persist the current TimelineEvent snapshot."""
+    from . import db
+
+    events = build_timeline_events(
+        traces=db.all_traces(),
+        responsibility_assessments=db.all_responsibility_assessments(),
+        recommendations=db.all_recommendations(),
+    )
+    db.replace_timeline_events(events)
+    return len(events)
