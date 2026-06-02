@@ -28,6 +28,7 @@ MAINDATA_ENDPOINT = "/api/v2/sync/maindata"
 PROPERTIES_ENDPOINT = "/api/v2/torrents/properties"
 PEERS_ENDPOINT = "/api/v2/sync/torrentPeers"
 FILES_ENDPOINT = "/api/v2/torrents/files"
+DELETE_ENDPOINT = "/api/v2/torrents/delete"
 
 # Disk-space thresholds (bytes) for the free-space finding, when detectable.
 DISK_CRITICAL_BYTES = 512 * 1024 * 1024  # 512 MiB
@@ -176,6 +177,51 @@ def fetch_torrent_files(
         logger.warning("qBittorrent file evidence fetch failed: %s", exc)
 
     return results
+
+
+def delete_torrent_with_files(config: Config, torrent_hash: str) -> dict[str, Any]:
+    """Remove one torrent through qBittorrent and request file deletion.
+
+    This is intentionally not used by collectors or automatic workflows. The
+    controlled cleanup execution interpreter calls it only after explicit
+    config gates and candidate prechecks pass.
+    """
+    if not config.service_enabled(SOURCE):
+        return {"ok": False, "error": "service disabled or not configured"}
+
+    target = str(torrent_hash or "").strip().lower()
+    if not target:
+        return {"ok": False, "error": "no torrent hash supplied"}
+
+    svc = config.service(SOURCE)
+    base_url = str(svc.get("base_url", "")).rstrip("/")
+    username = svc.get("username", "")
+    password = svc.get("password", "")
+    delete_endpoint = svc.get("delete_endpoint", DELETE_ENDPOINT)
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            if not _login(client, base_url, username, password):
+                return {"ok": False, "error": "login failed"}
+            resp = client.post(
+                f"{base_url}{delete_endpoint}",
+                data={"hashes": target, "deleteFiles": "true"},
+            )
+            if resp.status_code >= 400:
+                return {
+                    "ok": False,
+                    "status_code": resp.status_code,
+                    "error": resp.text.strip(),
+                }
+            return {
+                "ok": True,
+                "status_code": resp.status_code,
+                "endpoint": delete_endpoint,
+                "hashes": target,
+                "deleteFiles": True,
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def collect(config: Config) -> int:

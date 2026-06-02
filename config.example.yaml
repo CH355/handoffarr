@@ -53,6 +53,17 @@ cleanup_review:
   max_file_checks_per_poll: 200
   file_size_tolerance_bytes: 10485760  # 10 MiB
 
+cleanup_execution:
+  enabled: false
+  allow_single_item_execution: false
+  require_confirmation_phrase: true
+  max_items_per_request: 1
+  allowed_review_class: "Safe Review Candidate"
+  allowed_match_strengths:
+    - "Exact Hash/DownloadId Match"
+    - "Exact Library Path Match"
+    - "Filename + Size Match"
+
 services:
   seerr:
     enabled: true

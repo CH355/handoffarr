@@ -266,6 +266,53 @@
         </table>
       </section>
 
+      <section id="cleanup-action-plan-card" class="queue-card">
+        <h2>Cleanup Action Plan</h2>
+        <div class="queue-stats">
+          <div class="stat"><span class="num" id="cap-count">-</span><span class="lbl">Included</span></div>
+          <div class="stat"><span class="num" id="cap-recoverable">-</span><span class="lbl">Recoverable</span></div>
+          <div class="stat"><span class="num" id="cap-total">-</span><span class="lbl">Matching safe</span></div>
+        </div>
+        <div class="card-row"><span class="card-label">Export</span><a id="cap-export" href="/api/cleanup/action-plan.txt" style="color:#6ea8fe;text-decoration:none;" target="_blank" rel="noreferrer">Open text action plan</a></div>
+        <div class="card-row"><span class="card-label">Read-only</span><span>Handoffarr does not delete files. Use this as a manual review aid.</span></div>
+        <table class="review-table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Recoverable</th>
+              <th>Match strength</th>
+              <th>Confidence</th>
+              <th>Reason</th>
+              <th>Checklist</th>
+            </tr>
+          </thead>
+          <tbody id="cleanup-action-plan-body"></tbody>
+        </table>
+      </section>
+
+      <section id="cleanup-execution-card" class="queue-card">
+        <h2>Cleanup Execution</h2>
+        <div class="queue-stats">
+          <div class="stat"><span class="num" id="ce-enabled">-</span><span class="lbl">Execution</span></div>
+          <div class="stat"><span class="num" id="ce-single">-</span><span class="lbl">Single item</span></div>
+          <div class="stat"><span class="num" id="ce-history-count">-</span><span class="lbl">History</span></div>
+        </div>
+        <div class="card-row"><span class="card-label">Warning</span><span>Execution is disabled by default. Handoffarr only allows one Safe Review Candidate at a time.</span></div>
+        <div class="card-row"><span class="card-label">Dry run</span><span>POST <code>/api/cleanup/execute/dry-run</code> with media_id, qbit_hash, and confirmation <code>DRY RUN CLEANUP &lt;media_id&gt;</code>.</span></div>
+        <table class="review-table">
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Title</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Blocking reasons</th>
+            </tr>
+          </thead>
+          <tbody id="cleanup-execution-body"></tbody>
+        </table>
+      </section>
+
       <details class="drilldown">
         <summary>Drill down · technical detail</summary>
         <div class="drilldown-body">
@@ -671,6 +718,87 @@
         tr.appendChild(reason);
         tr.appendChild(checklist);
         tr.appendChild(details);
+        body.appendChild(tr);
+      });
+    }
+
+    async function loadCleanupActionPlanCard() {
+      const card = document.getElementById('cleanup-action-plan-card');
+      if (!card) return;
+      let data;
+      try {
+        data = await (await fetch('/api/cleanup/action-plan?limit=5')).json();
+      } catch (e) { return; }
+      const summary = data.summary || {};
+      document.getElementById('cap-count').textContent =
+        summary.included_candidates ?? '-';
+      document.getElementById('cap-total').textContent =
+        summary.total_candidates ?? '-';
+      document.getElementById('cap-recoverable').textContent =
+        formatBytes(summary.included_recoverable_bytes);
+      const exportLink = document.getElementById('cap-export');
+      if (exportLink) exportLink.href = '/api/cleanup/action-plan.txt?limit=25';
+
+      const body = document.getElementById('cleanup-action-plan-body');
+      if (!body) return;
+      body.innerHTML = '';
+      const candidates = data.candidates || [];
+      if (candidates.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="6" class="muted">No safe candidates in the default action plan.</td>';
+        body.appendChild(tr);
+        return;
+      }
+      candidates.forEach(item => {
+        const tr = document.createElement('tr');
+        const checklistUrl = item.checklist_url || ('/api/cleanup/review/' + encodeURIComponent(item.media_id || '') + '/checklist');
+        tr.innerHTML =
+          '<td><div class="review-title"></div><div class="muted"></div></td>' +
+          '<td>' + formatBytes(item.recoverable_bytes) + '</td>' +
+          '<td>' + (item.match_strength || '-') + '</td>' +
+          '<td>' + (item.confidence_score ?? '-') + '</td>' +
+          '<td class="review-reason"></td>' +
+          '<td><a style="color:#6ea8fe;text-decoration:none;" target="_blank" rel="noreferrer">Checklist</a></td>';
+        tr.querySelector('.review-title').textContent = item.media_title || item.media_id || 'unknown';
+        tr.querySelector('.muted').textContent = item.qbit_hash || '';
+        tr.querySelector('.review-reason').textContent = (item.reasons || [])[0] || '-';
+        tr.querySelector('a').href = checklistUrl;
+        body.appendChild(tr);
+      });
+    }
+
+    async function loadCleanupExecutionCard() {
+      const card = document.getElementById('cleanup-execution-card');
+      if (!card) return;
+      let data;
+      try {
+        data = await (await fetch('/api/cleanup/executions')).json();
+      } catch (e) { return; }
+      const config = data.config || {};
+      const executions = data.executions || [];
+      document.getElementById('ce-enabled').textContent =
+        config.enabled ? 'Enabled' : 'Disabled';
+      document.getElementById('ce-single').textContent =
+        config.allow_single_item_execution ? 'Enabled' : 'Disabled';
+      document.getElementById('ce-history-count').textContent = executions.length;
+      const body = document.getElementById('cleanup-execution-body');
+      if (!body) return;
+      body.innerHTML = '';
+      if (executions.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="5" class="muted">No cleanup execution history yet.</td>';
+        body.appendChild(tr);
+        return;
+      }
+      executions.slice(0, 10).forEach(item => {
+        const tr = document.createElement('tr');
+        const blocking = (item.blocking_reasons || []).join(' ');
+        tr.innerHTML =
+          '<td>' + (item.created_at || '-') + '</td>' +
+          '<td>' + (item.media_title || item.media_id || '-') + '</td>' +
+          '<td>' + (item.requested_action || '-') + '</td>' +
+          '<td>' + (item.execution_status || '-') + '</td>' +
+          '<td class="review-reason">' + (blocking || '-') + '</td>';
         body.appendChild(tr);
       });
     }
@@ -1169,6 +1297,8 @@
 
     loadOpsView();
     loadCleanupReviewCard();
+    loadCleanupActionPlanCard();
+    loadCleanupExecutionCard();
     loadDecisionCard();
     loadLifecycleCard();
     loadRecommendationsCard();

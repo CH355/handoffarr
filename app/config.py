@@ -56,6 +56,18 @@ DEFAULTS: dict[str, Any] = {
         "max_file_checks_per_poll": 200,
         "file_size_tolerance_bytes": 10485760,
     },
+    "cleanup_execution": {
+        "enabled": False,
+        "allow_single_item_execution": False,
+        "require_confirmation_phrase": True,
+        "max_items_per_request": 1,
+        "allowed_review_class": "Safe Review Candidate",
+        "allowed_match_strengths": [
+            "Exact Hash/DownloadId Match",
+            "Exact Library Path Match",
+            "Filename + Size Match",
+        ],
+    },
     "matching": {
         "prefer_torrent_hash": True,
         "fallback_to_download_id": True,

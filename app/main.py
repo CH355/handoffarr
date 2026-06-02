@@ -34,12 +34,19 @@ from .collectors import (
 from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visibility
 from .cleanup_review import (
     build_cleanup_review,
+    cleanup_action_plan_response,
+    cleanup_action_plan_text,
     cleanup_review_response,
     media_cleanup_checklist,
     media_cleanup_review_response,
 )
 from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
+from .cleanup_execution import (
+    config_status as cleanup_execution_config_status,
+    dry_run as cleanup_execution_dry_run,
+    execute as cleanup_execute,
+)
 from .decision import (
     decisions_response,
     media_decision_response,
@@ -314,6 +321,105 @@ async def api_cleanup() -> JSONResponse:
     return JSONResponse(cleanup_response(db.all_cleanup_events()))
 
 
+def _cleanup_review_items() -> list[dict]:
+    return build_cleanup_review(
+        db.all_cleanup_events(),
+        db.all_import_events(),
+        db.all_library_artifacts(),
+        db.all_traces(),
+        get_config(),
+    )
+
+
+@app.get("/api/cleanup/action-plan")
+async def api_cleanup_action_plan(
+    review_class: str | None = "Safe Review Candidate",
+    match_strength: str | None = None,
+    min_recoverable_bytes: int | None = None,
+    source_application: str | None = None,
+    media_type: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> JSONResponse:
+    return JSONResponse(
+        cleanup_action_plan_response(
+            _cleanup_review_items(),
+            review_class=review_class,
+            match_strength=match_strength,
+            min_recoverable_bytes=min_recoverable_bytes,
+            source_application=source_application,
+            media_type=media_type,
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@app.get("/api/cleanup/action-plan.txt")
+async def api_cleanup_action_plan_text(
+    review_class: str | None = "Safe Review Candidate",
+    match_strength: str | None = None,
+    min_recoverable_bytes: int | None = None,
+    source_application: str | None = None,
+    media_type: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> PlainTextResponse:
+    plan = cleanup_action_plan_response(
+        _cleanup_review_items(),
+        review_class=review_class,
+        match_strength=match_strength,
+        min_recoverable_bytes=min_recoverable_bytes,
+        source_application=source_application,
+        media_type=media_type,
+        limit=limit,
+        offset=offset,
+    )
+    return PlainTextResponse(cleanup_action_plan_text(plan))
+
+
+@app.get("/api/cleanup/executions")
+async def api_cleanup_executions(limit: int = 100) -> JSONResponse:
+    config = get_config()
+    return JSONResponse(
+        {
+            "config": cleanup_execution_config_status(config),
+            "executions": db.all_cleanup_executions(limit=max(1, min(limit, 500))),
+        }
+    )
+
+
+@app.post("/api/cleanup/execute/dry-run")
+async def api_cleanup_execute_dry_run(payload: dict) -> JSONResponse:
+    result = cleanup_execution_dry_run(
+        media_id=str(payload.get("media_id") or ""),
+        qbit_hash=str(payload.get("qbit_hash") or ""),
+        confirmation=str(payload.get("confirmation") or ""),
+        cleanup_events=db.all_cleanup_events(),
+        import_events=db.all_import_events(),
+        library_artifacts=db.all_library_artifacts(),
+        traces=db.all_traces(),
+        config=get_config(),
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/cleanup/execute")
+async def api_cleanup_execute(payload: dict) -> JSONResponse:
+    result = cleanup_execute(
+        media_id=str(payload.get("media_id") or ""),
+        qbit_hash=str(payload.get("qbit_hash") or ""),
+        confirmation=str(payload.get("confirmation") or ""),
+        cleanup_events=db.all_cleanup_events(),
+        import_events=db.all_import_events(),
+        library_artifacts=db.all_library_artifacts(),
+        traces=db.all_traces(),
+        config=get_config(),
+        post_execute_poll=poll_once,
+    )
+    return JSONResponse(result)
+
+
 @app.get("/api/cleanup/review")
 async def api_cleanup_review(
     review_class: str | None = None,
@@ -327,13 +433,7 @@ async def api_cleanup_review(
 ) -> JSONResponse:
     return JSONResponse(
         cleanup_review_response(
-            build_cleanup_review(
-                db.all_cleanup_events(),
-                db.all_import_events(),
-                db.all_library_artifacts(),
-                db.all_traces(),
-                get_config(),
-            ),
+            _cleanup_review_items(),
             review_class=review_class,
             match_strength=match_strength,
             min_recoverable_bytes=min_recoverable_bytes,
@@ -350,13 +450,7 @@ async def api_cleanup_review(
 async def api_cleanup_review_checklist(media_id: str) -> PlainTextResponse:
     checklist = media_cleanup_checklist(
         media_id,
-        build_cleanup_review(
-            db.all_cleanup_events(),
-            db.all_import_events(),
-            db.all_library_artifacts(),
-            db.all_traces(),
-            get_config(),
-        ),
+        _cleanup_review_items(),
     )
     if checklist is None:
         return PlainTextResponse(
@@ -371,13 +465,7 @@ async def api_cleanup_review_media(media_id: str) -> JSONResponse:
     return JSONResponse(
         media_cleanup_review_response(
             media_id,
-            build_cleanup_review(
-                db.all_cleanup_events(),
-                db.all_import_events(),
-                db.all_library_artifacts(),
-                db.all_traces(),
-                get_config(),
-            ),
+            _cleanup_review_items(),
         )
     )
 

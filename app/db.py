@@ -170,6 +170,24 @@ def init_db() -> None:
                 observed_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS cleanup_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT,
+                media_id TEXT,
+                media_title TEXT,
+                qbit_hash TEXT,
+                review_class TEXT,
+                match_strength TEXT,
+                requested_action TEXT,
+                execution_status TEXT,
+                recoverable_bytes INTEGER,
+                confirmation_phrase TEXT,
+                blocking_reasons_json TEXT,
+                evidence_json TEXT,
+                created_at TEXT,
+                completed_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
@@ -202,6 +220,10 @@ def init_db() -> None:
                 ON recommendations (priority, observed_at);
             CREATE INDEX IF NOT EXISTS idx_recommendations_category
                 ON recommendations (category, observed_at);
+            CREATE INDEX IF NOT EXISTS idx_cleanup_executions_created
+                ON cleanup_executions (created_at);
+            CREATE INDEX IF NOT EXISTS idx_cleanup_executions_media
+                ON cleanup_executions (media_id, created_at);
             """
         )
         _migrate_handoff_traces(conn)
@@ -811,3 +833,83 @@ def all_responsibility_assessments() -> list[dict[str, Any]]:
                 assessment[public_key] = default
         assessments.append(assessment)
     return assessments
+
+
+def insert_cleanup_execution(execution: dict[str, Any]) -> None:
+    created_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO cleanup_executions
+                (execution_id, media_id, media_title, qbit_hash, review_class,
+                 match_strength, requested_action, execution_status,
+                 recoverable_bytes, confirmation_phrase, blocking_reasons_json,
+                 evidence_json, created_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                execution.get("execution_id"),
+                str(execution.get("media_id"))
+                if execution.get("media_id") is not None
+                else None,
+                execution.get("media_title"),
+                execution.get("qbit_hash"),
+                execution.get("review_class"),
+                execution.get("match_strength"),
+                execution.get("requested_action"),
+                execution.get("execution_status"),
+                execution.get("recoverable_bytes"),
+                execution.get("confirmation_phrase"),
+                json.dumps(execution.get("blocking_reasons") or []),
+                json.dumps(execution.get("evidence") or {}, default=str),
+                execution.get("created_at") or created_default,
+                execution.get("completed_at"),
+            ),
+        )
+
+
+def update_cleanup_execution(execution_id: str, updates: dict[str, Any]) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            UPDATE cleanup_executions
+            SET execution_status = ?,
+                blocking_reasons_json = ?,
+                evidence_json = ?,
+                completed_at = ?
+            WHERE execution_id = ?
+            """,
+            (
+                updates.get("execution_status"),
+                json.dumps(updates.get("blocking_reasons") or []),
+                json.dumps(updates.get("evidence") or {}, default=str),
+                updates.get("completed_at") or _utcnow(),
+                execution_id,
+            ),
+        )
+
+
+def all_cleanup_executions(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM cleanup_executions ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    executions: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for stored_key, public_key, default in (
+            ("blocking_reasons_json", "blocking_reasons", []),
+            ("evidence_json", "evidence", {}),
+        ):
+            raw = item.pop(stored_key, None)
+            if raw:
+                try:
+                    item[public_key] = json.loads(raw)
+                except (TypeError, ValueError):
+                    item[public_key] = default
+            else:
+                item[public_key] = default
+        executions.append(item)
+    return executions

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from . import db
@@ -872,3 +873,163 @@ def media_cleanup_checklist(media_id: str, items: list[dict[str, Any]]) -> str |
     if not matching:
         return None
     return cleanup_checklist_text(matching[0])
+
+
+def _action_plan_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    evidence = item.get("evidence") or {}
+    qbit = evidence.get("qbittorrent_torrent") or {}
+    paths = item.get("paths") or {}
+    reasons = item.get("risk_reasons") or item.get("safe_reasons") or [item.get("reason")]
+    return {
+        "media_id": item.get("media_id"),
+        "media_title": item.get("media_title"),
+        "media_type": item.get("media_type"),
+        "review_class": item.get("review_class"),
+        "match_strength": item.get("match_strength"),
+        "confidence_score": item.get("confidence_score"),
+        "recoverable_bytes": item.get("recoverable_bytes"),
+        "qbit_name": qbit.get("torrent_name"),
+        "qbit_hash": item.get("torrent_hash") or qbit.get("torrent_hash"),
+        "retained_save_path": qbit.get("save_path") or paths.get("download_path"),
+        "library_path": paths.get("library_path"),
+        "checklist_url": f"/api/cleanup/review/{item.get('media_id')}/checklist",
+        "manual_action": (
+            "Review manually outside Handoffarr. Handoffarr does not delete files."
+        ),
+        "reasons": [reason for reason in reasons if reason],
+    }
+
+
+def cleanup_action_plan_response(
+    items: list[dict[str, Any]],
+    *,
+    review_class: str | None = SAFE_REVIEW,
+    match_strength: str | None = None,
+    min_recoverable_bytes: int | None = None,
+    source_application: str | None = None,
+    media_type: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict[str, Any]:
+    filtered = _apply_filters(
+        items,
+        review_class=review_class,
+        match_strength=match_strength,
+        min_recoverable_bytes=min_recoverable_bytes,
+        source_application=source_application,
+        media_type=media_type,
+    )
+    sorted_items = _sort_items(filtered, SORT_RECOVERABLE)
+    safe_limit = max(0, min(limit, 500))
+    safe_offset = max(0, offset)
+    included = sorted_items[safe_offset : safe_offset + safe_limit]
+    filters = {
+        "review_class": review_class,
+        "match_strength": match_strength,
+        "min_recoverable_bytes": min_recoverable_bytes,
+        "source_application": source_application,
+        "media_type": media_type,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "sort": SORT_RECOVERABLE,
+    }
+    return {
+        "summary": {
+            "total_candidates": len(filtered),
+            "included_candidates": len(included),
+            "total_recoverable_bytes": sum(
+                _to_int(item.get("recoverable_bytes")) for item in filtered
+            ),
+            "included_recoverable_bytes": sum(
+                _to_int(item.get("recoverable_bytes")) for item in included
+            ),
+            "filters_applied": filters,
+            "warning_read_only": (
+                "Handoffarr does not delete files. Use this as a manual review aid. "
+                "Do not bulk delete risky candidates."
+            ),
+        },
+        "candidates": [_action_plan_candidate(item) for item in included],
+    }
+
+
+def cleanup_action_plan_text(plan: dict[str, Any]) -> str:
+    summary = plan.get("summary") or {}
+    filters = summary.get("filters_applied") or {}
+    lines = [
+        "Handoffarr Cleanup Action Plan",
+        f"Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "READ-ONLY WARNING: Handoffarr does not delete files.",
+        "Use this as a manual review aid. Do not bulk delete risky candidates.",
+        "",
+        "Filter summary:",
+    ]
+    for key in (
+        "review_class",
+        "match_strength",
+        "min_recoverable_bytes",
+        "source_application",
+        "media_type",
+        "limit",
+        "offset",
+        "sort",
+    ):
+        lines.append(f"- {key}: {filters.get(key)}")
+    lines.extend(
+        [
+            "",
+            f"Total candidates matching filters: {summary.get('total_candidates')}",
+            f"Included candidates: {summary.get('included_candidates')}",
+            "Total included recoverable space: "
+            f"{summary.get('included_recoverable_bytes')} "
+            f"({_format_bytes(summary.get('included_recoverable_bytes'))})",
+            "",
+        ]
+    )
+
+    for index, candidate in enumerate(plan.get("candidates") or [], start=1):
+        reasons = candidate.get("reasons") or []
+        lines.extend(
+            [
+                f"Candidate {index}",
+                f"Title: {candidate.get('media_title')}",
+                f"Media ID: {candidate.get('media_id')}",
+                f"Media type: {candidate.get('media_type')}",
+                "Recoverable size: "
+                f"{candidate.get('recoverable_bytes')} "
+                f"({_format_bytes(candidate.get('recoverable_bytes'))})",
+                f"Review class: {candidate.get('review_class')}",
+                f"Match strength: {candidate.get('match_strength')}",
+                f"Confidence score: {candidate.get('confidence_score')}",
+                f"qBittorrent name: {candidate.get('qbit_name')}",
+                f"qBittorrent hash: {candidate.get('qbit_hash')}",
+                f"Retained save path: {candidate.get('retained_save_path')}",
+                f"Library path: {candidate.get('library_path')}",
+                f"Checklist: {candidate.get('checklist_url')}",
+                "Why Handoffarr classified it this way:",
+            ]
+        )
+        if reasons:
+            lines.extend(f"- {reason}" for reason in reasons)
+        else:
+            lines.append("- No reason recorded.")
+        lines.extend(
+            [
+                "Manual verification steps:",
+                "1. Open qBittorrent and find the torrent by name or hash.",
+                "2. Confirm the retained save path matches this plan.",
+                "3. Open the per-item checklist and verify retained file paths and sizes.",
+                "4. Confirm the library path exists and the library file works.",
+                "5. Confirm this is not a partial pack or risky candidate before deleting outside Handoffarr.",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "Final warning:",
+            "Handoffarr does not delete files. Do not bulk delete risky candidates.",
+        ]
+    )
+    return "\n".join(lines)
