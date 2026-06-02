@@ -48,6 +48,11 @@ cleanup:
     # retention rather than recoverable cleanup candidates.
     retention_min_ratio:
 
+cleanup_review:
+  enabled: true
+  max_file_checks_per_poll: 200
+  file_size_tolerance_bytes: 10485760  # 10 MiB
+
 services:
   seerr:
     enabled: true

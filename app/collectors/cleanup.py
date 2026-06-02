@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import db
 from ..config import Config
+from . import qbittorrent
 
 logger = logging.getLogger("handoffarr.collectors.cleanup")
 
@@ -69,6 +70,21 @@ def _torrent_size(payload: dict[str, Any]) -> int:
         if value > 0:
             return value
     return 0
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cleanup_review_config(config: Config) -> dict[str, Any]:
+    section = config.section("cleanup_review")
+    return {
+        "enabled": bool(section.get("enabled", True)),
+        "max_file_checks_per_poll": int(section.get("max_file_checks_per_poll", 200)),
+    }
 
 
 def _build_observations(config: Config, observed_at: str) -> list[dict[str, Any]]:
@@ -130,6 +146,7 @@ def _build_observations(config: Config, observed_at: str) -> list[dict[str, Any]
             "media_title": media_title,
             "source_application": import_event.get("source_application"),
             "torrent_hash": observed_hash or None,
+            "download_id": import_evidence.get("download_id"),
             "import_status": import_event.get("import_status"),
             "import_timestamp": import_event.get("import_timestamp"),
             "library_status": None,
@@ -140,6 +157,8 @@ def _build_observations(config: Config, observed_at: str) -> list[dict[str, Any]
             "torrent_progress": torrent_payload.get("progress"),
             "retained_bytes": _torrent_size(torrent_payload) if torrent_event else 0,
             "download_path": torrent_payload.get("save_path"),
+            "content_path": torrent_payload.get("content_path"),
+            "torrent_name": torrent_payload.get("name"),
             "ratio": torrent_payload.get("ratio"),
             "seeding_time": torrent_payload.get("seeding_time"),
             "category": torrent_payload.get("category"),
@@ -159,11 +178,77 @@ def _build_observations(config: Config, observed_at: str) -> list[dict[str, Any]
     return observations
 
 
+def _store_file_evidence(
+    config: Config,
+    observations: list[dict[str, Any]],
+    observed_at: str,
+) -> int:
+    review_config = _cleanup_review_config(config)
+    if not review_config["enabled"]:
+        return 0
+
+    hashes: list[str] = []
+    seen: set[str] = set()
+    for observation in sorted(
+        observations,
+        key=lambda item: _to_int(item.get("retained_bytes")),
+        reverse=True,
+    ):
+        if not observation.get("torrent_present"):
+            continue
+        torrent_hash = str(observation.get("torrent_hash") or "").lower()
+        if not torrent_hash or torrent_hash in seen:
+            continue
+        if _to_int(observation.get("retained_bytes")) <= 0:
+            continue
+        hashes.append(torrent_hash)
+        seen.add(torrent_hash)
+        if len(hashes) >= review_config["max_file_checks_per_poll"]:
+            break
+
+    if not hashes:
+        return 0
+
+    by_hash = {str(obs.get("torrent_hash") or "").lower(): obs for obs in observations}
+    results = qbittorrent.fetch_torrent_files(config, hashes)
+    stored = 0
+    for torrent_hash, result in results.items():
+        observation = by_hash.get(torrent_hash, {})
+        files = result.get("files") if isinstance(result, dict) else []
+        payload = {
+            "torrent_hash": torrent_hash,
+            "media_id": observation.get("media_id"),
+            "media_title": observation.get("media_title"),
+            "torrent_name": observation.get("torrent_name"),
+            "save_path": observation.get("download_path"),
+            "content_path": observation.get("content_path"),
+            "library_path": observation.get("library_path"),
+            "library_file_exists": observation.get("library_file_exists"),
+            "ok": result.get("ok") if isinstance(result, dict) else False,
+            "error": result.get("error") if isinstance(result, dict) else "no result",
+            "files": files if isinstance(files, list) else [],
+            "observed_at": observed_at,
+        }
+        db.insert_raw_event(
+            source=SOURCE,
+            event_type="file_evidence",
+            external_id=f"cleanup-files:{torrent_hash}",
+            title=observation.get("media_title"),
+            torrent_hash=torrent_hash,
+            download_id=None,
+            payload=payload,
+            observed_at=observed_at,
+        )
+        stored += 1
+    return stored
+
+
 def collect(config: Config) -> int:
     """Persist cleanup evidence observations through raw_events."""
     observed_at = _utcnow()
     stored = 0
-    for observation in _build_observations(config, observed_at):
+    observations = _build_observations(config, observed_at)
+    for observation in observations:
         db.insert_raw_event(
             source=SOURCE,
             event_type="observation",
@@ -175,5 +260,6 @@ def collect(config: Config) -> int:
             observed_at=observed_at,
         )
         stored += 1
+    stored += _store_file_evidence(config, observations, observed_at)
     logger.info("Cleanup collector stored %d observations", stored)
     return stored

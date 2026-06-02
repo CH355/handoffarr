@@ -27,6 +27,7 @@ SPEED_LIMITS_MODE_ENDPOINT = "/api/v2/transfer/speedLimitsMode"
 MAINDATA_ENDPOINT = "/api/v2/sync/maindata"
 PROPERTIES_ENDPOINT = "/api/v2/torrents/properties"
 PEERS_ENDPOINT = "/api/v2/sync/torrentPeers"
+FILES_ENDPOINT = "/api/v2/torrents/files"
 
 # Disk-space thresholds (bytes) for the free-space finding, when detectable.
 DISK_CRITICAL_BYTES = 512 * 1024 * 1024  # 512 MiB
@@ -114,6 +115,67 @@ def fetch_torrents_raw(
     if not isinstance(torrents, list):
         return False, "unexpected torrents payload shape (expected a list)", []
     return True, None, [t for t in torrents if isinstance(t, dict)]
+
+
+def fetch_torrent_files(
+    config: Config,
+    torrent_hashes: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Read-only bounded fetch of qBittorrent file lists for specific hashes."""
+    if not config.service_enabled(SOURCE):
+        return {}
+
+    svc = config.service(SOURCE)
+    base_url = str(svc.get("base_url", "")).rstrip("/")
+    username = svc.get("username", "")
+    password = svc.get("password", "")
+    files_endpoint = svc.get("files_endpoint", FILES_ENDPOINT)
+
+    results: dict[str, dict[str, Any]] = {}
+    hashes = []
+    seen: set[str] = set()
+    for value in torrent_hashes:
+        torrent_hash = str(value or "").strip().lower()
+        if torrent_hash and torrent_hash not in seen:
+            hashes.append(torrent_hash)
+            seen.add(torrent_hash)
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            if not _login(client, base_url, username, password):
+                return {
+                    torrent_hash: {
+                        "ok": False,
+                        "error": "login failed",
+                        "files": [],
+                    }
+                    for torrent_hash in hashes
+                }
+
+            for torrent_hash in hashes:
+                try:
+                    resp = client.get(
+                        f"{base_url}{files_endpoint}",
+                        params={"hash": torrent_hash},
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    files = payload if isinstance(payload, list) else []
+                    results[torrent_hash] = {
+                        "ok": isinstance(payload, list),
+                        "error": None if isinstance(payload, list) else "unexpected files payload shape",
+                        "files": [f for f in files if isinstance(f, dict)],
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    results[torrent_hash] = {
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "files": [],
+                    }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qBittorrent file evidence fetch failed: %s", exc)
+
+    return results
 
 
 def collect(config: Config) -> int:
@@ -838,6 +900,7 @@ def _normalize_torrent_full(t: dict[str, Any]) -> dict[str, Any]:
             "added_on": _to_int(t.get("added_on")),
             "completion_on": _to_int(t.get("completion_on")),
             "save_path": t.get("save_path"),
+            "content_path": t.get("content_path"),
             "tracker": t.get("tracker"),
         }
     )

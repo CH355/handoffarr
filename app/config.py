@@ -51,6 +51,11 @@ DEFAULTS: dict[str, Any] = {
             "retention_min_ratio": None,
         },
     },
+    "cleanup_review": {
+        "enabled": True,
+        "max_file_checks_per_poll": 200,
+        "file_size_tolerance_bytes": 10485760,
+    },
     "matching": {
         "prefer_torrent_hash": True,
         "fallback_to_download_id": True,

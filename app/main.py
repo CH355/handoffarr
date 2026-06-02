@@ -322,6 +322,7 @@ async def api_cleanup_review() -> JSONResponse:
                 db.all_import_events(),
                 db.all_library_artifacts(),
                 db.all_traces(),
+                get_config(),
             )
         )
     )
@@ -337,6 +338,7 @@ async def api_cleanup_review_media(media_id: str) -> JSONResponse:
                 db.all_import_events(),
                 db.all_library_artifacts(),
                 db.all_traces(),
+                get_config(),
             ),
         )
     )

@@ -238,12 +238,14 @@
       <section id="cleanup-review-card" class="queue-card">
         <h2>Cleanup Review</h2>
         <div class="queue-stats">
-          <div class="stat"><span class="num" id="cr-recoverable">-</span><span class="lbl">Recoverable</span></div>
+          <div class="stat"><span class="num" id="cr-cleanup-recoverable">-</span><span class="lbl">Cleanup recoverable</span></div>
+          <div class="stat"><span class="num" id="cr-recoverable">-</span><span class="lbl">Review recoverable</span></div>
           <div class="stat"><span class="num" id="cr-safe">-</span><span class="lbl">Safe review</span></div>
           <div class="stat"><span class="num" id="cr-risky">-</span><span class="lbl">Risky review</span></div>
           <div class="stat"><span class="num" id="cr-missing">-</span><span class="lbl">Missing library</span></div>
           <div class="stat"><span class="num" id="cr-unknown">-</span><span class="lbl">Unknown evidence</span></div>
         </div>
+        <div class="card-row hidden" id="cr-mismatch-row"><span class="card-label">Mismatch warning</span><span id="cr-mismatch">-</span></div>
         <div class="card-row"><span class="card-label">Manual review only</span><span>No delete actions are available in Handoffarr.</span></div>
         <table class="review-table">
           <thead>
@@ -251,6 +253,7 @@
               <th>Title</th>
               <th>Recoverable</th>
               <th>Review class</th>
+              <th>Match strength</th>
               <th>Evidence</th>
               <th>Reason</th>
               <th>Details</th>
@@ -567,14 +570,33 @@
     async function loadCleanupReviewCard() {
       const card = document.getElementById('cleanup-review-card');
       if (!card) return;
-      let data;
+      let data, cleanup = {};
       try {
         const resp = await fetch('/api/cleanup/review');
         data = await resp.json();
       } catch (e) { return; }
+      try {
+        cleanup = await (await fetch('/api/cleanup')).json();
+      } catch (e) {}
       const summary = data.summary || {};
+      const cleanupSummary = cleanup.summary || {};
+      document.getElementById('cr-cleanup-recoverable').textContent =
+        formatBytes(cleanupSummary.total_recoverable_bytes);
       document.getElementById('cr-recoverable').textContent =
         formatBytes(summary.recoverable_bytes);
+      const mismatchRow = document.getElementById('cr-mismatch-row');
+      const mismatch = document.getElementById('cr-mismatch');
+      if (mismatchRow && mismatch) {
+        const cleanupBytes = Number(cleanupSummary.total_recoverable_bytes || 0);
+        const reviewBytes = Number(summary.recoverable_bytes || 0);
+        if (cleanupBytes !== reviewBytes) {
+          mismatch.textContent = 'Cleanup reports ' + formatBytes(cleanupBytes) +
+            '; review reports ' + formatBytes(reviewBytes) + '.';
+          mismatchRow.classList.remove('hidden');
+        } else {
+          mismatchRow.classList.add('hidden');
+        }
+      }
       document.getElementById('cr-safe').textContent =
         summary.safe_candidate_count ?? '-';
       document.getElementById('cr-risky').textContent =
@@ -589,7 +611,7 @@
       const candidates = data.top_candidates || [];
       if (candidates.length === 0) {
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td colspan="6" class="muted">No cleanup review candidates yet.</td>';
+        tr.innerHTML = '<td colspan="7" class="muted">No cleanup review candidates yet.</td>';
         body.appendChild(tr);
         return;
       }
@@ -598,6 +620,7 @@
         const title = document.createElement('td');
         const size = document.createElement('td');
         const klass = document.createElement('td');
+        const match = document.createElement('td');
         const evidence = document.createElement('td');
         const reason = document.createElement('td');
         const details = document.createElement('td');
@@ -611,6 +634,7 @@
         const pill = klass.querySelector('.review-class');
         pill.textContent = item.review_class || 'Unknown Evidence Candidate';
         pill.className = 'review-class ' + reviewClassName(item.review_class);
+        match.textContent = item.match_strength || '-';
         evidence.textContent = item.evidence_strength || '-';
         reason.className = 'review-reason';
         reason.textContent = item.reason || '-';
@@ -618,12 +642,15 @@
         details.querySelector('pre').textContent = JSON.stringify({
           checks: item.checks || {},
           paths: item.paths || {},
-          reasons: item.reasons || [],
+          matched_retained_files: item.matched_retained_files || [],
+          risk_reasons: item.risk_reasons || [],
+          safe_reasons: item.safe_reasons || [],
         }, null, 2);
 
         tr.appendChild(title);
         tr.appendChild(size);
         tr.appendChild(klass);
+        tr.appendChild(match);
         tr.appendChild(evidence);
         tr.appendChild(reason);
         tr.appendChild(details);
