@@ -1,0 +1,4 @@
+# Live exports are local artefacts; commit only fixtures intentionally curated
+# alongside a case study.
+*.json
+!example.json
