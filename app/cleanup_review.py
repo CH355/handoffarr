@@ -30,6 +30,9 @@ FILENAME_SIZE = "Filename + Size Match"
 PACK_PARTIAL = "Multi-file Pack Partial Match"
 TITLE_ONLY = "Title Only Match"
 NO_MATCH = "No Match"
+SORT_RECOVERABLE = "recoverable_bytes desc"
+SORT_CONFIDENCE = "confidence_score desc"
+SORT_TITLE = "media_title asc"
 
 REVIEW_CLASSES = (
     SAFE_REVIEW,
@@ -439,6 +442,8 @@ def _classify_item(
     return {
         "cleanup_id": cleanup_event.get("cleanup_id"),
         "media_id": cleanup_event.get("media_id"),
+        "media_type": (import_event or {}).get("media_type")
+        or (library_artifact or {}).get("media_type"),
         "media_title": cleanup_event.get("media_title"),
         "source_application": cleanup_event.get("source_application"),
         "torrent_hash": cleanup_event.get("torrent_hash"),
@@ -627,12 +632,223 @@ def summarize_cleanup_review(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def cleanup_review_response(items: list[dict[str, Any]]) -> dict[str, Any]:
+def _apply_filters(
+    items: list[dict[str, Any]],
+    *,
+    review_class: str | None = None,
+    match_strength: str | None = None,
+    min_recoverable_bytes: int | None = None,
+    source_application: str | None = None,
+    media_type: str | None = None,
+) -> list[dict[str, Any]]:
     active = [item for item in items if not item.get("excluded_by_dedupe")]
+    if review_class:
+        active = [item for item in active if item.get("review_class") == review_class]
+    if match_strength:
+        active = [item for item in active if item.get("match_strength") == match_strength]
+    if min_recoverable_bytes is not None:
+        active = [
+            item
+            for item in active
+            if _to_int(item.get("recoverable_bytes")) >= min_recoverable_bytes
+        ]
+    if source_application:
+        expected = source_application.lower()
+        active = [
+            item
+            for item in active
+            if str(item.get("source_application") or "").lower() == expected
+        ]
+    if media_type:
+        expected = media_type.lower()
+        active = [
+            item
+            for item in active
+            if str(item.get("media_type") or "").lower() == expected
+        ]
+    return active
+
+
+def _sort_items(items: list[dict[str, Any]], sort: str | None) -> list[dict[str, Any]]:
+    selected = sort or SORT_RECOVERABLE
+    if selected == SORT_CONFIDENCE:
+        return sorted(
+            items,
+            key=lambda item: (
+                float(item.get("confidence_score") or 0),
+                _to_int(item.get("recoverable_bytes")),
+            ),
+            reverse=True,
+        )
+    if selected == SORT_TITLE:
+        return sorted(items, key=lambda item: str(item.get("media_title") or "").lower())
+    return sorted(
+        items,
+        key=lambda item: _to_int(item.get("recoverable_bytes")),
+        reverse=True,
+    )
+
+
+def cleanup_review_response(
+    items: list[dict[str, Any]],
+    *,
+    review_class: str | None = None,
+    match_strength: str | None = None,
+    min_recoverable_bytes: int | None = None,
+    source_application: str | None = None,
+    media_type: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    sort: str | None = None,
+) -> dict[str, Any]:
+    active = [item for item in items if not item.get("excluded_by_dedupe")]
+    filtered = _apply_filters(
+        active,
+        review_class=review_class,
+        match_strength=match_strength,
+        min_recoverable_bytes=min_recoverable_bytes,
+        source_application=source_application,
+        media_type=media_type,
+    )
+    sorted_items = _sort_items(filtered, sort)
+    safe_offset = max(0, offset)
+    safe_limit = 100 if limit is None else max(0, min(limit, 500))
+    page = sorted_items[safe_offset : safe_offset + safe_limit]
     return {
-        "summary": summarize_cleanup_review(active),
-        "top_candidates": active[:10],
-        "candidates": active,
+        "summary": summarize_cleanup_review(filtered),
+        "filters": {
+            "review_class": review_class,
+            "match_strength": match_strength,
+            "min_recoverable_bytes": min_recoverable_bytes,
+            "source_application": source_application,
+            "media_type": media_type,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "sort": sort or SORT_RECOVERABLE,
+        },
+        "pagination": {
+            "total": len(filtered),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "returned": len(page),
+        },
+        "top_candidates": page[:10],
+        "candidates": page,
+    }
+
+
+def _format_bytes(value: Any) -> str:
+    size = float(_to_int(value))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024
+        idx += 1
+    return f"{size:.1f} {units[idx]}" if idx >= 3 else f"{size:.0f} {units[idx]}"
+
+
+def cleanup_checklist_text(item: dict[str, Any]) -> str:
+    evidence = item.get("evidence") or {}
+    qbit = evidence.get("qbittorrent_torrent") or {}
+    files = evidence.get("qbittorrent_files") or {}
+    paths = item.get("paths") or {}
+    matched_files = item.get("matched_retained_files") or []
+    retained_files = files.get("files") if isinstance(files.get("files"), list) else []
+    retained_paths = [
+        _full_retained_path(files, f)
+        for f in retained_files
+        if isinstance(f, dict) and _is_video(str(f.get("name") or ""))
+    ]
+    if not retained_paths:
+        retained_paths = [f.get("retained_path") for f in matched_files if f.get("retained_path")]
+
+    matched_lines = []
+    for matched in matched_files:
+        matched_lines.append(
+            f"- {matched.get('retained_path')} "
+            f"({ _format_bytes(matched.get('size')) })"
+        )
+    if not matched_lines:
+        matched_lines.append("- No retained file was strongly matched.")
+
+    reason_lines = item.get("risk_reasons") or item.get("safe_reasons") or [item.get("reason")]
+    reason_lines = [line for line in reason_lines if line]
+
+    return "\n".join(
+        [
+            "Handoffarr Cleanup Manual Review Checklist",
+            "",
+            "WARNING: Handoffarr does not delete files.",
+            "Use this as a manual review aid. Delete outside Handoffarr only after verifying the item yourself.",
+            "Bulk deletion is unsafe while risky candidates remain.",
+            "",
+            f"Item title: {item.get('media_title') or 'unknown'}",
+            f"Media ID: {item.get('media_id') or 'unknown'}",
+            f"Media type: {item.get('media_type') or 'unknown'}",
+            f"Review class: {item.get('review_class') or 'unknown'}",
+            f"Match strength: {item.get('match_strength') or 'unknown'}",
+            f"Confidence score: {item.get('confidence_score')}",
+            f"Recoverable bytes: {item.get('recoverable_bytes')} ({_format_bytes(item.get('recoverable_bytes'))})",
+            "",
+            "qBittorrent retained download:",
+            f"- Name: {qbit.get('torrent_name') or files.get('torrent_name') or 'unknown'}",
+            f"- Hash: {item.get('torrent_hash') or qbit.get('torrent_hash') or 'unknown'}",
+            f"- Save path: {qbit.get('save_path') or files.get('save_path') or paths.get('download_path') or 'unknown'}",
+            "",
+            "Retained file path(s):",
+            *(f"- {path}" for path in retained_paths),
+            "",
+            "Library evidence:",
+            f"- Library path: {paths.get('library_path') or 'unknown'}",
+            f"- Library file exists: {item.get('library_file_exists')}",
+            f"- Library file size: {item.get('library_file_size')} ({_format_bytes(item.get('library_file_size'))})",
+            "",
+            "Matched retained file(s):",
+            *matched_lines,
+            "",
+            "Why Handoffarr classified it this way:",
+            *(f"- {line}" for line in reason_lines),
+            "",
+            "Manual verification steps before deleting outside Handoffarr:",
+            "1. Open qBittorrent and find the torrent by name or hash.",
+            "2. Confirm the retained save path and retained file path(s) match this checklist.",
+            "3. Confirm the library path exists and plays/opens correctly.",
+            "4. Confirm the retained media file size matches the library file size within the configured tolerance.",
+            "5. Confirm this is not a multi-file pack, season pack, or partial retained download unless every retained media file is accounted for.",
+            "6. Only then decide manually whether to delete outside Handoffarr.",
+            "",
+            "Handoffarr does not delete files.",
+        ]
+    )
+
+
+def manual_review_packet(item: dict[str, Any]) -> dict[str, Any]:
+    evidence = item.get("evidence") or {}
+    return {
+        "media_title": item.get("media_title"),
+        "media_id": item.get("media_id"),
+        "media_type": item.get("media_type"),
+        "review_class": item.get("review_class"),
+        "recoverable_bytes": item.get("recoverable_bytes"),
+        "match_strength": item.get("match_strength"),
+        "confidence_score": item.get("confidence_score"),
+        "reason": item.get("reason"),
+        "risk_reasons": item.get("risk_reasons") or [],
+        "safe_reasons": item.get("safe_reasons") or [],
+        "import_evidence": evidence.get("import") or {},
+        "library_evidence": evidence.get("library") or {},
+        "cleanup_evidence": evidence.get("cleanup") or {},
+        "retained_download_evidence": {
+            "paths": item.get("paths") or {},
+            "retained_file_count": item.get("retained_file_count"),
+            "retained_video_file_count": item.get("retained_video_file_count"),
+            "retained_total_bytes": item.get("retained_total_bytes"),
+            "matched_retained_files": item.get("matched_retained_files") or [],
+        },
+        "qbittorrent_torrent_evidence": evidence.get("qbittorrent_torrent") or {},
+        "qbittorrent_file_evidence": evidence.get("qbittorrent_files") or {},
+        "manual_checklist_text": cleanup_checklist_text(item),
+        "candidate": item,
     }
 
 
@@ -646,18 +862,13 @@ def media_cleanup_review_response(media_id: str, items: list[dict[str, Any]]) ->
             "candidates": [],
         }
     latest = matching[0]
-    return {
-        "media_id": media_id,
-        "review_class": latest.get("review_class"),
-        "reason": latest.get("reason"),
-        "match_strength": latest.get("match_strength"),
-        "confidence_score": latest.get("confidence_score"),
-        "import_evidence": latest.get("evidence", {}).get("import") or {},
-        "library_evidence": latest.get("evidence", {}).get("library") or {},
-        "cleanup_evidence": latest.get("evidence", {}).get("cleanup") or {},
-        "qbittorrent_torrent_evidence": latest.get("evidence", {}).get("qbittorrent_torrent") or {},
-        "qbittorrent_file_evidence": latest.get("evidence", {}).get("qbittorrent_files") or {},
-        "risk_reasons": latest.get("risk_reasons") or [],
-        "safe_reasons": latest.get("safe_reasons") or [],
-        "candidates": matching,
-    }
+    packet = manual_review_packet(latest)
+    packet["candidates"] = matching
+    return packet
+
+
+def media_cleanup_checklist(media_id: str, items: list[dict[str, Any]]) -> str | None:
+    matching = [item for item in items if str(item.get("media_id")) == str(media_id)]
+    if not matching:
+        return None
+    return cleanup_checklist_text(matching[0])

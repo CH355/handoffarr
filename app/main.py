@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -35,6 +35,7 @@ from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visib
 from .cleanup_review import (
     build_cleanup_review,
     cleanup_review_response,
+    media_cleanup_checklist,
     media_cleanup_review_response,
 )
 from .config import Config, load_config
@@ -314,7 +315,16 @@ async def api_cleanup() -> JSONResponse:
 
 
 @app.get("/api/cleanup/review")
-async def api_cleanup_review() -> JSONResponse:
+async def api_cleanup_review(
+    review_class: str | None = None,
+    match_strength: str | None = None,
+    min_recoverable_bytes: int | None = None,
+    source_application: str | None = None,
+    media_type: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    sort: str | None = None,
+) -> JSONResponse:
     return JSONResponse(
         cleanup_review_response(
             build_cleanup_review(
@@ -323,9 +333,37 @@ async def api_cleanup_review() -> JSONResponse:
                 db.all_library_artifacts(),
                 db.all_traces(),
                 get_config(),
-            )
+            ),
+            review_class=review_class,
+            match_strength=match_strength,
+            min_recoverable_bytes=min_recoverable_bytes,
+            source_application=source_application,
+            media_type=media_type,
+            limit=limit,
+            offset=offset,
+            sort=sort,
         )
     )
+
+
+@app.get("/api/cleanup/review/{media_id}/checklist")
+async def api_cleanup_review_checklist(media_id: str) -> PlainTextResponse:
+    checklist = media_cleanup_checklist(
+        media_id,
+        build_cleanup_review(
+            db.all_cleanup_events(),
+            db.all_import_events(),
+            db.all_library_artifacts(),
+            db.all_traces(),
+            get_config(),
+        ),
+    )
+    if checklist is None:
+        return PlainTextResponse(
+            f"No cleanup review evidence exists for media_id {media_id}.",
+            status_code=404,
+        )
+    return PlainTextResponse(checklist)
 
 
 @app.get("/api/cleanup/review/{media_id}")

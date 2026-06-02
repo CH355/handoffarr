@@ -240,13 +240,15 @@
         <div class="queue-stats">
           <div class="stat"><span class="num" id="cr-cleanup-recoverable">-</span><span class="lbl">Cleanup recoverable</span></div>
           <div class="stat"><span class="num" id="cr-recoverable">-</span><span class="lbl">Review recoverable</span></div>
+          <div class="stat"><span class="num" id="cr-safe-recoverable">-</span><span class="lbl">Safe recoverable</span></div>
           <div class="stat"><span class="num" id="cr-safe">-</span><span class="lbl">Safe review</span></div>
           <div class="stat"><span class="num" id="cr-risky">-</span><span class="lbl">Risky review</span></div>
           <div class="stat"><span class="num" id="cr-missing">-</span><span class="lbl">Missing library</span></div>
           <div class="stat"><span class="num" id="cr-unknown">-</span><span class="lbl">Unknown evidence</span></div>
+          <div class="stat"><span class="num" id="cr-cleaned">-</span><span class="lbl">Already cleaned</span></div>
         </div>
         <div class="card-row hidden" id="cr-mismatch-row"><span class="card-label">Mismatch warning</span><span id="cr-mismatch">-</span></div>
-        <div class="card-row"><span class="card-label">Manual review only</span><span>No delete actions are available in Handoffarr.</span></div>
+        <div class="card-row"><span class="card-label">Manual review only</span><span>Handoffarr does not delete files. Use this as a manual review aid. Bulk deletion is unsafe while risky candidates remain.</span></div>
         <table class="review-table">
           <thead>
             <tr>
@@ -256,6 +258,7 @@
               <th>Match strength</th>
               <th>Evidence</th>
               <th>Reason</th>
+              <th>Checklist</th>
               <th>Details</th>
             </tr>
           </thead>
@@ -572,23 +575,30 @@
       if (!card) return;
       let data, cleanup = {};
       try {
-        const resp = await fetch('/api/cleanup/review');
+        const resp = await fetch('/api/cleanup/review?review_class=Safe%20Review%20Candidate&limit=10');
         data = await resp.json();
       } catch (e) { return; }
       try {
         cleanup = await (await fetch('/api/cleanup')).json();
       } catch (e) {}
       const summary = data.summary || {};
+      let allReview = {};
+      try {
+        allReview = await (await fetch('/api/cleanup/review?limit=0')).json();
+      } catch (e) {}
+      const allSummary = allReview.summary || {};
       const cleanupSummary = cleanup.summary || {};
       document.getElementById('cr-cleanup-recoverable').textContent =
         formatBytes(cleanupSummary.total_recoverable_bytes);
       document.getElementById('cr-recoverable').textContent =
-        formatBytes(summary.recoverable_bytes);
+        formatBytes(allSummary.recoverable_bytes ?? summary.recoverable_bytes);
+      document.getElementById('cr-safe-recoverable').textContent =
+        formatBytes(allSummary.safe_recoverable_bytes ?? summary.safe_recoverable_bytes);
       const mismatchRow = document.getElementById('cr-mismatch-row');
       const mismatch = document.getElementById('cr-mismatch');
       if (mismatchRow && mismatch) {
         const cleanupBytes = Number(cleanupSummary.total_recoverable_bytes || 0);
-        const reviewBytes = Number(summary.recoverable_bytes || 0);
+        const reviewBytes = Number((allSummary.recoverable_bytes ?? summary.recoverable_bytes) || 0);
         if (cleanupBytes !== reviewBytes) {
           mismatch.textContent = 'Cleanup reports ' + formatBytes(cleanupBytes) +
             '; review reports ' + formatBytes(reviewBytes) + '.';
@@ -598,20 +608,22 @@
         }
       }
       document.getElementById('cr-safe').textContent =
-        summary.safe_candidate_count ?? '-';
+        allSummary.safe_candidate_count ?? summary.safe_candidate_count ?? '-';
       document.getElementById('cr-risky').textContent =
-        summary.risky_candidate_count ?? '-';
+        allSummary.risky_candidate_count ?? summary.risky_candidate_count ?? '-';
       document.getElementById('cr-missing').textContent =
-        summary.missing_library_count ?? '-';
+        allSummary.missing_library_count ?? summary.missing_library_count ?? '-';
       document.getElementById('cr-unknown').textContent =
-        summary.unknown_evidence_count ?? '-';
+        allSummary.unknown_evidence_count ?? summary.unknown_evidence_count ?? '-';
+      document.getElementById('cr-cleaned').textContent =
+        allSummary.already_cleaned_count ?? summary.already_cleaned_count ?? '-';
 
       const body = document.getElementById('cleanup-review-body');
       body.innerHTML = '';
       const candidates = data.top_candidates || [];
       if (candidates.length === 0) {
         const tr = document.createElement('tr');
-        tr.innerHTML = '<td colspan="7" class="muted">No cleanup review candidates yet.</td>';
+        tr.innerHTML = '<td colspan="8" class="muted">No safe cleanup review candidates yet.</td>';
         body.appendChild(tr);
         return;
       }
@@ -623,6 +635,7 @@
         const match = document.createElement('td');
         const evidence = document.createElement('td');
         const reason = document.createElement('td');
+        const checklist = document.createElement('td');
         const details = document.createElement('td');
 
         title.innerHTML = '<div class="review-title"></div><div class="muted"></div>';
@@ -638,6 +651,9 @@
         evidence.textContent = item.evidence_strength || '-';
         reason.className = 'review-reason';
         reason.textContent = item.reason || '-';
+        const checklistUrl = '/api/cleanup/review/' + encodeURIComponent(item.media_id || '') + '/checklist';
+        checklist.innerHTML = '<a style="color:#6ea8fe;text-decoration:none;" target="_blank" rel="noreferrer">Checklist</a>';
+        checklist.querySelector('a').href = checklistUrl;
         details.innerHTML = '<details class="raw-details"><summary>Evidence</summary><pre></pre></details>';
         details.querySelector('pre').textContent = JSON.stringify({
           checks: item.checks || {},
@@ -653,6 +669,7 @@
         tr.appendChild(match);
         tr.appendChild(evidence);
         tr.appendChild(reason);
+        tr.appendChild(checklist);
         tr.appendChild(details);
         body.appendChild(tr);
       });
