@@ -171,6 +171,21 @@
       color: #6b7280; }
     details.drilldown[open] > summary::before { content: '\25BE'; }
     details.drilldown > .drilldown-body { padding: 0 18px 18px; }
+    .review-class { font-size: 12px; padding: 2px 8px; border-radius: 12px;
+                    display: inline-block; white-space: nowrap; font-weight: 600; }
+    .review-safe { background: #11331f; color: #7ee2a8; }
+    .review-risky { background: #3a2f17; color: #f1d99a; }
+    .review-missing { background: #3a1b1b; color: #f1a3a3; }
+    .review-unknown { background: #262a31; color: #9aa0a6; }
+    .review-cleaned { background: #1f2937; color: #c4c8cd; }
+    .review-table td { max-width: 340px; }
+    .review-title { font-weight: 600; }
+    .review-reason { color: #c4c8cd; }
+    .raw-details summary { cursor: pointer; color: #9aa0a6; font-size: 12px; }
+    .raw-details pre { white-space: pre-wrap; word-break: break-word;
+                       background: #111318; border: 1px solid #262a31;
+                       border-radius: 6px; padding: 8px; max-height: 260px;
+                       overflow: auto; color: #c4c8cd; }
   </style>
 </head>
 <body>
@@ -218,6 +233,31 @@
             <ul class="ops-list" id="ops-broken-list"></ul>
           </div>
         </div>
+      </section>
+
+      <section id="cleanup-review-card" class="queue-card">
+        <h2>Cleanup Review</h2>
+        <div class="queue-stats">
+          <div class="stat"><span class="num" id="cr-recoverable">-</span><span class="lbl">Recoverable</span></div>
+          <div class="stat"><span class="num" id="cr-safe">-</span><span class="lbl">Safe review</span></div>
+          <div class="stat"><span class="num" id="cr-risky">-</span><span class="lbl">Risky review</span></div>
+          <div class="stat"><span class="num" id="cr-missing">-</span><span class="lbl">Missing library</span></div>
+          <div class="stat"><span class="num" id="cr-unknown">-</span><span class="lbl">Unknown evidence</span></div>
+        </div>
+        <div class="card-row"><span class="card-label">Manual review only</span><span>No delete actions are available in Handoffarr.</span></div>
+        <table class="review-table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Recoverable</th>
+              <th>Review class</th>
+              <th>Evidence</th>
+              <th>Reason</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="cleanup-review-body"></tbody>
+        </table>
       </section>
 
       <details class="drilldown">
@@ -514,6 +554,81 @@
       }
       const display = idx >= 3 ? size.toFixed(1) : size.toFixed(0);
       return (n < 0 ? '-' : '') + display + ' ' + units[idx];
+    }
+
+    function reviewClassName(name) {
+      if (name === 'Safe Review Candidate') return 'review-safe';
+      if (name === 'Risky Review Candidate') return 'review-risky';
+      if (name === 'Missing Library Candidate') return 'review-missing';
+      if (name === 'Already Cleaned') return 'review-cleaned';
+      return 'review-unknown';
+    }
+
+    async function loadCleanupReviewCard() {
+      const card = document.getElementById('cleanup-review-card');
+      if (!card) return;
+      let data;
+      try {
+        const resp = await fetch('/api/cleanup/review');
+        data = await resp.json();
+      } catch (e) { return; }
+      const summary = data.summary || {};
+      document.getElementById('cr-recoverable').textContent =
+        formatBytes(summary.recoverable_bytes);
+      document.getElementById('cr-safe').textContent =
+        summary.safe_candidate_count ?? '-';
+      document.getElementById('cr-risky').textContent =
+        summary.risky_candidate_count ?? '-';
+      document.getElementById('cr-missing').textContent =
+        summary.missing_library_count ?? '-';
+      document.getElementById('cr-unknown').textContent =
+        summary.unknown_evidence_count ?? '-';
+
+      const body = document.getElementById('cleanup-review-body');
+      body.innerHTML = '';
+      const candidates = data.top_candidates || [];
+      if (candidates.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="6" class="muted">No cleanup review candidates yet.</td>';
+        body.appendChild(tr);
+        return;
+      }
+      candidates.forEach(item => {
+        const tr = document.createElement('tr');
+        const title = document.createElement('td');
+        const size = document.createElement('td');
+        const klass = document.createElement('td');
+        const evidence = document.createElement('td');
+        const reason = document.createElement('td');
+        const details = document.createElement('td');
+
+        title.innerHTML = '<div class="review-title"></div><div class="muted"></div>';
+        title.querySelector('.review-title').textContent =
+          item.media_title || item.media_id || 'unknown';
+        title.querySelector('.muted').textContent = item.torrent_hash || '';
+        size.textContent = formatBytes(item.recoverable_bytes || item.retained_bytes);
+        klass.innerHTML = '<span class="review-class"></span>';
+        const pill = klass.querySelector('.review-class');
+        pill.textContent = item.review_class || 'Unknown Evidence Candidate';
+        pill.className = 'review-class ' + reviewClassName(item.review_class);
+        evidence.textContent = item.evidence_strength || '-';
+        reason.className = 'review-reason';
+        reason.textContent = item.reason || '-';
+        details.innerHTML = '<details class="raw-details"><summary>Evidence</summary><pre></pre></details>';
+        details.querySelector('pre').textContent = JSON.stringify({
+          checks: item.checks || {},
+          paths: item.paths || {},
+          reasons: item.reasons || [],
+        }, null, 2);
+
+        tr.appendChild(title);
+        tr.appendChild(size);
+        tr.appendChild(klass);
+        tr.appendChild(evidence);
+        tr.appendChild(reason);
+        tr.appendChild(details);
+        body.appendChild(tr);
+      });
     }
 
     function confidenceText(confidence) {
@@ -1009,6 +1124,7 @@
     }
 
     loadOpsView();
+    loadCleanupReviewCard();
     loadDecisionCard();
     loadLifecycleCard();
     loadRecommendationsCard();

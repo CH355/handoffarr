@@ -187,6 +187,7 @@ def build_cleanup_events(config: Config) -> list[dict[str, Any]]:
             "import_status": observation.get("import_status"),
             "library_status": observation.get("library_status"),
             "library_path": observation.get("library_path"),
+            "library_file_exists": observation.get("library_file_exists"),
             "torrent_present": observation.get("torrent_present"),
             "torrent_state": observation.get("torrent_state"),
             "download_path": observation.get("download_path"),

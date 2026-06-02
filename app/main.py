@@ -32,6 +32,11 @@ from .collectors import (
     sonarr_imports,
 )
 from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visibility
+from .cleanup_review import (
+    build_cleanup_review,
+    cleanup_review_response,
+    media_cleanup_review_response,
+)
 from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
 from .decision import (
@@ -306,6 +311,35 @@ async def api_library_media(media_id: str) -> JSONResponse:
 @app.get("/api/cleanup")
 async def api_cleanup() -> JSONResponse:
     return JSONResponse(cleanup_response(db.all_cleanup_events()))
+
+
+@app.get("/api/cleanup/review")
+async def api_cleanup_review() -> JSONResponse:
+    return JSONResponse(
+        cleanup_review_response(
+            build_cleanup_review(
+                db.all_cleanup_events(),
+                db.all_import_events(),
+                db.all_library_artifacts(),
+                db.all_traces(),
+            )
+        )
+    )
+
+
+@app.get("/api/cleanup/review/{media_id}")
+async def api_cleanup_review_media(media_id: str) -> JSONResponse:
+    return JSONResponse(
+        media_cleanup_review_response(
+            media_id,
+            build_cleanup_review(
+                db.all_cleanup_events(),
+                db.all_import_events(),
+                db.all_library_artifacts(),
+                db.all_traces(),
+            ),
+        )
+    )
 
 
 @app.get("/api/cleanup/{media_id}")
