@@ -568,9 +568,7 @@ def summarize_recommendations(recommendations: list[dict[str, Any]]) -> dict[str
         category = str(rec.get("category") or "Unknown")
         counts_by_category[category] = counts_by_category.get(category, 0) + 1
         impact = rec.get("expected_impact") or {}
-        total_recoverable_bytes += _to_int(
-            impact.get("recoverable_bytes") or impact.get("retained_bytes")
-        )
+        total_recoverable_bytes += _to_int(impact.get("recoverable_bytes"))
         total_affected += _to_int(impact.get("affected_items"))
     top = recommendations[0] if recommendations else None
     return {
@@ -615,14 +613,26 @@ def run_recommendations(config) -> int:
     unit-tested without pulling in db / config side effects.
     """
     from . import db
+    from .cleanup_reconciliation import (
+        latest_completed_execution_index,
+        matching_completed_execution,
+    )
     from .responsibility import build_storage_summary
 
     traces = db.all_traces()
+    completed_execution_index = latest_completed_execution_index(
+        db.all_cleanup_executions(limit=5000)
+    )
+    cleanup_events = [
+        event
+        for event in db.all_cleanup_events()
+        if not matching_completed_execution(event, completed_execution_index)
+    ]
     recommendations = build_recommendations(
         assessments=db.all_responsibility_assessments(),
         import_events=db.all_import_events(),
         library_artifacts=db.all_library_artifacts(),
-        cleanup_events=db.all_cleanup_events(),
+        cleanup_events=cleanup_events,
         storage_summary=build_storage_summary(config),
         queue_summary=build_queue_summary(traces),
         traces=traces,

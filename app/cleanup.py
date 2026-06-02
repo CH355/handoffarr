@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import db, states
+from .cleanup_reconciliation import (
+    latest_completed_execution_index,
+    matching_completed_execution,
+)
 from .config import Config
 from .imports import IMPORT_SUCCESS
 from .library import LIBRARY_PRESENT
@@ -178,6 +182,9 @@ def _classify(observation: dict[str, Any], config: dict[str, Any]) -> tuple[str,
 def build_cleanup_events(config: Config) -> list[dict[str, Any]]:
     """Build the current CleanupEvent snapshot from cleanup observations."""
     cleanup_config = _cleanup_config(config)
+    completed_execution_index = latest_completed_execution_index(
+        db.all_cleanup_executions(limit=5000)
+    )
     cleanup_events: list[dict[str, Any]] = []
     for observation in _latest_observations():
         status, messages = _classify(observation, cleanup_config)
@@ -194,23 +201,50 @@ def build_cleanup_events(config: Config) -> list[dict[str, Any]]:
             "match_source": observation.get("match_source"),
             "retention": messages[-1] if status == RETENTION_INTENTIONAL else None,
         }
+        event = {
+            "cleanup_id": observation.get("cleanup_id"),
+            "media_id": observation.get("media_id"),
+            "media_title": observation.get("media_title"),
+            "source_application": observation.get("source_application"),
+            "torrent_hash": observation.get("torrent_hash"),
+            "cleanup_status": status,
+            "retained_bytes": retained_bytes,
+            "recoverable_bytes": (
+                retained_bytes
+                if status in {CLEANUP_PENDING, CLEANUP_FAILED}
+                else 0
+            ),
+            "cleanup_timestamp": observation.get("observed_at"),
+            "evidence": evidence,
+        }
+        completed_execution = matching_completed_execution(
+            event, completed_execution_index
+        )
+        if completed_execution:
+            evidence = dict(evidence)
+            evidence.update(
+                {
+                    "torrent_present": False,
+                    "retained_bytes": 0,
+                    "post_execution_reconciled": True,
+                    "cleanup_execution": completed_execution,
+                    "messages": [
+                        *messages,
+                        "Controlled cleanup execution completed.",
+                        "qBittorrent item removed and library file preserved.",
+                    ],
+                }
+            )
+            event.update(
+                {
+                    "cleanup_status": CLEANUP_COMPLETED,
+                    "retained_bytes": 0,
+                    "recoverable_bytes": 0,
+                    "evidence": evidence,
+                }
+            )
         cleanup_events.append(
-            {
-                "cleanup_id": observation.get("cleanup_id"),
-                "media_id": observation.get("media_id"),
-                "media_title": observation.get("media_title"),
-                "source_application": observation.get("source_application"),
-                "torrent_hash": observation.get("torrent_hash"),
-                "cleanup_status": status,
-                "retained_bytes": retained_bytes,
-                "recoverable_bytes": (
-                    retained_bytes
-                    if status in {CLEANUP_PENDING, CLEANUP_FAILED}
-                    else 0
-                ),
-                "cleanup_timestamp": observation.get("observed_at"),
-                "evidence": evidence,
-            }
+            event
         )
     return cleanup_events
 

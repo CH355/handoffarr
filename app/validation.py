@@ -21,6 +21,11 @@ from .cleanup import (
     CLEANUP_PENDING,
     CLEANUP_UNKNOWN,
 )
+from .cleanup_reconciliation import (
+    latest_completed_execution_index,
+    matching_completed_execution,
+)
+from .cleanup_review import RISKY_REVIEW, SAFE_REVIEW, build_cleanup_review
 from .config import Config
 from .imports import IMPORT_SUCCESS
 from .library import (
@@ -191,18 +196,89 @@ def validate_recommendations(
     )
 
 
+def validate_completed_execution_reconciliation(
+    config: Config,
+    cleanup_events: list[dict[str, Any]],
+    import_events: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    traces: list[dict[str, Any]],
+    executions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    completed_index = latest_completed_execution_index(executions)
+    completed_hashes = set((completed_index.get("by_hash") or {}).keys())
+    if not completed_hashes:
+        return _check(
+            "Cleanup Execution Reconciliation",
+            OK,
+            "No completed cleanup executions require reconciliation.",
+        )
+
+    review_items = build_cleanup_review(
+        cleanup_events,
+        import_events,
+        artifacts,
+        traces,
+        config,
+    )
+    offenders: list[dict[str, Any]] = []
+    for item in review_items:
+        if item.get("review_class") not in {SAFE_REVIEW, RISKY_REVIEW}:
+            continue
+        matched = matching_completed_execution(item, completed_index)
+        if not matched:
+            continue
+        offenders.append(
+            {
+                "media_id": item.get("media_id"),
+                "media_title": item.get("media_title"),
+                "qbit_hash": item.get("qbit_hash") or item.get("torrent_hash"),
+                "review_class": item.get("review_class"),
+                "recoverable_bytes": item.get("recoverable_bytes"),
+                "execution_id": matched.get("execution_id"),
+            }
+        )
+    if offenders:
+        return _check(
+            "Cleanup Execution Reconciliation",
+            FAIL,
+            "Completed cleanup execution still appears as a Safe or Risky cleanup review candidate.",
+            {"offenders": offenders[:10], "count": len(offenders)},
+        )
+    return _check(
+        "Cleanup Execution Reconciliation",
+        OK,
+        "Completed cleanup executions are excluded from Safe and Risky review candidates.",
+        {"completed_execution_hashes": len(completed_hashes)},
+    )
+
+
 def run_validation(config: Config) -> dict[str, Any]:
     """Run every validation check against the current persisted state."""
     import_events = db.all_import_events()
     artifacts = enrich_library_artifacts(db.all_library_artifacts(), config)
     cleanup_events = db.all_cleanup_events()
     recommendations = db.all_recommendations()
+    executions = db.all_cleanup_executions(limit=5000)
+    completed_index = latest_completed_execution_index(executions)
+    recommendation_cleanup_events = [
+        event
+        for event in cleanup_events
+        if not matching_completed_execution(event, completed_index)
+    ]
 
     checks = [
         validate_imports(import_events, artifacts),
         validate_library(artifacts),
         validate_cleanup(artifacts, cleanup_events),
-        validate_recommendations(cleanup_events, recommendations),
+        validate_recommendations(recommendation_cleanup_events, recommendations),
+        validate_completed_execution_reconciliation(
+            config,
+            cleanup_events,
+            import_events,
+            artifacts,
+            db.all_traces(),
+            executions,
+        ),
     ]
     overall = OK
     if any(c["status"] == FAIL for c in checks):

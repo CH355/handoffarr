@@ -15,6 +15,10 @@ from typing import Any
 
 from . import db
 from .cleanup import CLEANUP_COMPLETED, CLEANUP_FAILED, CLEANUP_PENDING
+from .cleanup_reconciliation import (
+    latest_completed_execution_index,
+    matching_completed_execution,
+)
 from .config import Config
 from .imports import IMPORT_SUCCESS
 from .library import LIBRARY_MISSING, LIBRARY_PRESENT, LIBRARY_UNKNOWN
@@ -80,9 +84,11 @@ def _candidate_hash(item: dict[str, Any]) -> str | None:
     evidence = item.get("evidence") or {}
     qbit = evidence.get("qbittorrent_torrent") or {}
     files = evidence.get("qbittorrent_files") or {}
+    execution = evidence.get("cleanup_execution") or {}
     value = (
         item.get("qbit_hash")
         or item.get("torrent_hash")
+        or execution.get("qbit_hash")
         or qbit.get("torrent_hash")
         or files.get("torrent_hash")
     )
@@ -221,6 +227,15 @@ def _retained_files(file_evidence: dict[str, Any] | None) -> list[dict[str, Any]
     return [item for item in file_evidence["files"] if isinstance(item, dict)]
 
 
+def _file_evidence_says_absent(file_evidence: dict[str, Any] | None) -> bool:
+    if not file_evidence:
+        return False
+    if file_evidence.get("ok") is not False:
+        return False
+    error = str(file_evidence.get("error") or "").lower()
+    return "404" in error or "not present" in error or "not found" in error
+
+
 def _full_retained_path(file_evidence: dict[str, Any] | None, file_info: dict[str, Any]) -> str:
     name = str(file_info.get("name") or "")
     content_path = (file_evidence or {}).get("content_path")
@@ -332,6 +347,7 @@ def _classify_item(
     library_artifact: dict[str, Any] | None,
     trace: dict[str, Any] | None,
     file_evidence: dict[str, Any] | None,
+    completed_execution: dict[str, Any] | None,
     imports_by_hash: dict[str, set[str]],
     tolerance: int,
 ) -> dict[str, Any]:
@@ -346,11 +362,17 @@ def _classify_item(
     library_present = library_status == LIBRARY_PRESENT
     library_missing = library_status == LIBRARY_MISSING
     library_unknown = library_status == LIBRARY_UNKNOWN or library_status is None
+    execution_reconciled = completed_execution is not None
+    live_absence_override = _file_evidence_says_absent(file_evidence)
     download_present = _download_copy_present(cleanup_event)
     torrent_state = str(evidence.get("torrent_state") or "").lower()
     state_completed = torrent_state in COMPLETED_STATES
     cleanup_recoverable = _to_int(cleanup_event.get("recoverable_bytes"))
     retained_bytes = _to_int(cleanup_event.get("retained_bytes"))
+    if execution_reconciled or live_absence_override:
+        download_present = False
+        cleanup_recoverable = 0
+        retained_bytes = 0
     match_source = evidence.get("match_source") or (trace or {}).get("match_source")
     torrent_hash = str(cleanup_event.get("torrent_hash") or "").lower()
     media_id = str(cleanup_event.get("media_id") or "")
@@ -428,8 +450,21 @@ def _classify_item(
 
     if import_success and library_present and not download_present:
         review_class = ALREADY_CLEANED
-        reason = "Library is present and the qBittorrent/download copy is gone."
+        reason = (
+            "Controlled cleanup execution removed the qBittorrent item and preserved the library file."
+            if execution_reconciled
+            else "Library is present and the qBittorrent/download copy is gone."
+        )
         cleanup_recoverable = 0
+        risk_reasons = []
+        safe_reasons = [
+            "Import Success exists.",
+            "Library Present exists.",
+            "qBittorrent/download copy is no longer present.",
+        ]
+        if execution_reconciled:
+            safe_reasons.append("Completed cleanup execution verified qBittorrent item disappeared.")
+            safe_reasons.append("Completed cleanup execution verified library file still exists.")
     elif import_success and library_missing and download_present:
         review_class = MISSING_LIBRARY
         reason = "Import succeeded, but the expected library path is missing while the download copy remains."
@@ -454,6 +489,8 @@ def _classify_item(
         "import_success": import_success,
         "library_status": library_status,
         "download_copy_present": download_present,
+        "post_execution_reconciled": execution_reconciled,
+        "live_absence_override": live_absence_override,
         "qbittorrent_completed_state": state_completed,
         "cleanup_recoverable_bytes": cleanup_recoverable,
         "match_source": match_source,
@@ -463,6 +500,7 @@ def _classify_item(
         "file_evidence_available": file_match["file_evidence_ok"],
     }
 
+    item_hash = torrent_hash or str((completed_execution or {}).get("qbit_hash") or "").lower()
     return _with_qbit_hash({
         "cleanup_id": cleanup_event.get("cleanup_id"),
         "media_id": cleanup_event.get("media_id"),
@@ -470,7 +508,7 @@ def _classify_item(
         or (library_artifact or {}).get("media_type"),
         "media_title": cleanup_event.get("media_title"),
         "source_application": cleanup_event.get("source_application"),
-        "torrent_hash": cleanup_event.get("torrent_hash"),
+        "torrent_hash": item_hash or cleanup_event.get("torrent_hash"),
         "download_id": evidence.get("download_id") or (import_event or {}).get("download_id"),
         "dedupe_key": "",
         "excluded_by_dedupe": False,
@@ -491,7 +529,9 @@ def _classify_item(
         "matched_retained_files": file_match["matched_retained_files"],
         "library_file_exists": bool(library_present),
         "library_file_size": library_size,
-        "cleanup_status": cleanup_event.get("cleanup_status"),
+        "cleanup_status": CLEANUP_COMPLETED
+        if execution_reconciled and library_present
+        else cleanup_event.get("cleanup_status"),
         "library_status": library_status,
         "import_status": import_status,
         "torrent_state": evidence.get("torrent_state"),
@@ -508,8 +548,9 @@ def _classify_item(
             "import": import_event or {},
             "library": library_artifact or {},
             "cleanup": evidence,
+            "cleanup_execution": completed_execution or {},
             "qbittorrent_torrent": {
-                "torrent_hash": cleanup_event.get("torrent_hash"),
+                "torrent_hash": item_hash or cleanup_event.get("torrent_hash"),
                 "torrent_name": evidence.get("torrent_name")
                 or (file_evidence or {}).get("torrent_name"),
                 "save_path": evidence.get("download_path")
@@ -601,6 +642,9 @@ def build_cleanup_review(
     library_by_media = _by_media(library_artifacts)
     traces_by_media = _by_media(traces)
     file_evidence_by_hash = _latest_file_evidence()
+    completed_execution_index = latest_completed_execution_index(
+        db.all_cleanup_executions(limit=5000)
+    )
     review_config = config.section("cleanup_review")
     tolerance = int(review_config.get("file_size_tolerance_bytes", 10485760))
 
@@ -617,12 +661,16 @@ def build_cleanup_review(
         media_id = str(cleanup_event.get("media_id") or "")
         import_event = imports_by_media.get(media_id)
         torrent_hash = str(cleanup_event.get("torrent_hash") or "").lower()
+        completed_execution = matching_completed_execution(
+            cleanup_event, completed_execution_index
+        )
         item = _classify_item(
             cleanup_event=cleanup_event,
             import_event=import_event,
             library_artifact=library_by_media.get(media_id),
             trace=traces_by_media.get(media_id),
             file_evidence=file_evidence_by_hash.get(torrent_hash),
+            completed_execution=completed_execution,
             imports_by_hash=imports_by_hash,
             tolerance=tolerance,
         )
@@ -775,6 +823,7 @@ def cleanup_checklist_text(item: dict[str, Any]) -> str:
     item = _with_qbit_hash(item)
     evidence = item.get("evidence") or {}
     qbit = evidence.get("qbittorrent_torrent") or {}
+    execution = evidence.get("cleanup_execution") or {}
     files = evidence.get("qbittorrent_files") or {}
     paths = item.get("paths") or {}
     matched_files = item.get("matched_retained_files") or []
@@ -799,12 +848,11 @@ def cleanup_checklist_text(item: dict[str, Any]) -> str:
     reason_lines = item.get("risk_reasons") or item.get("safe_reasons") or [item.get("reason")]
     reason_lines = [line for line in reason_lines if line]
 
-    return "\n".join(
-        [
+    lines = [
             "Handoffarr Cleanup Manual Review Checklist",
             "",
             "WARNING: Handoffarr does not delete files.",
-            "Use this as a manual review aid. Delete outside Handoffarr only after verifying the item yourself.",
+            "Use this as a manual review aid.",
             "Bulk deletion is unsafe while risky candidates remain.",
             "",
             f"Item title: {item.get('media_title') or 'unknown'}",
@@ -819,6 +867,27 @@ def cleanup_checklist_text(item: dict[str, Any]) -> str:
             f"- Name: {qbit.get('torrent_name') or files.get('torrent_name') or 'unknown'}",
             f"- qBittorrent hash: {item.get('qbit_hash') or item.get('torrent_hash') or qbit.get('torrent_hash') or 'unknown'}",
             f"- Save path: {qbit.get('save_path') or files.get('save_path') or paths.get('download_path') or 'unknown'}",
+    ]
+    if item.get("review_class") == ALREADY_CLEANED:
+        postcheck = (execution.get("evidence") or {}).get("postcheck") or {}
+        lines.extend(
+            [
+                "",
+                "Completed execution evidence:",
+                f"- Execution status: {execution.get('execution_status') or 'Completed'}",
+                f"- qBittorrent item removed: {postcheck.get('qbit_item_disappeared')}",
+                f"- Library file preserved: {postcheck.get('library_file_still_exists')}",
+                "",
+                "No cleanup action is recommended for this item because Handoffarr already verified it was cleaned.",
+                "",
+                "Handoffarr does not delete files directly.",
+            ]
+        )
+        return "\n".join(lines)
+
+    return "\n".join(
+        [
+            *lines,
             "",
             "Retained file path(s):",
             *(f"- {path}" for path in retained_paths),
@@ -860,12 +929,15 @@ def manual_review_packet(item: dict[str, Any]) -> dict[str, Any]:
         "recoverable_bytes": item.get("recoverable_bytes"),
         "match_strength": item.get("match_strength"),
         "confidence_score": item.get("confidence_score"),
+        "cleanup_status": item.get("cleanup_status"),
+        "checks": item.get("checks") or {},
         "reason": item.get("reason"),
         "risk_reasons": item.get("risk_reasons") or [],
         "safe_reasons": item.get("safe_reasons") or [],
         "import_evidence": evidence.get("import") or {},
         "library_evidence": evidence.get("library") or {},
         "cleanup_evidence": evidence.get("cleanup") or {},
+        "cleanup_execution_evidence": evidence.get("cleanup_execution") or {},
         "retained_download_evidence": {
             "paths": item.get("paths") or {},
             "retained_file_count": item.get("retained_file_count"),
