@@ -252,6 +252,79 @@ def validate_completed_execution_reconciliation(
     )
 
 
+def validate_batch_execution_safety(
+    config: Config,
+    batches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    cfg = config.section("cleanup_execution")
+    allowed_strengths = set(
+        cfg.get(
+            "allowed_match_strengths",
+            [
+                "Exact Hash/DownloadId Match",
+                "Exact Library Path Match",
+                "Filename + Size Match",
+            ],
+        )
+    )
+    offenders: list[dict[str, Any]] = []
+    checked = 0
+    for batch in batches:
+        evidence = batch.get("evidence") or {}
+        items = evidence.get("items") if isinstance(evidence.get("items"), list) else []
+        if not items:
+            continue
+        checked += 1
+        planned_total = int(batch.get("planned_recoverable_bytes") or 0)
+        item_total = sum(int(item.get("recoverable_bytes") or 0) for item in items)
+        if planned_total != item_total:
+            offenders.append(
+                {
+                    "batch_id": batch.get("batch_id"),
+                    "reason": "Batch planned recoverable bytes do not equal per-item sum.",
+                    "planned_recoverable_bytes": planned_total,
+                    "per_item_sum": item_total,
+                }
+            )
+        for item in items:
+            if item.get("review_class") != SAFE_REVIEW:
+                offenders.append(
+                    {
+                        "batch_id": batch.get("batch_id"),
+                        "media_id": item.get("media_id"),
+                        "reason": "Batch plan includes a non-safe review candidate.",
+                        "review_class": item.get("review_class"),
+                    }
+                )
+            if item.get("match_strength") not in allowed_strengths:
+                offenders.append(
+                    {
+                        "batch_id": batch.get("batch_id"),
+                        "media_id": item.get("media_id"),
+                        "reason": "Batch plan includes a disallowed match strength.",
+                        "match_strength": item.get("match_strength"),
+                    }
+                )
+    if offenders:
+        return _check(
+            "Cleanup Batch Safety",
+            FAIL,
+            "One or more cleanup batch plans violate execution safety rules.",
+            {"offenders": offenders[:10], "count": len(offenders)},
+        )
+    gate = (
+        "enabled"
+        if cfg.get("enabled") and cfg.get("allow_batch_execution")
+        else "closed"
+    )
+    return _check(
+        "Cleanup Batch Safety",
+        OK,
+        "Batch plans are limited to safe candidates and allowed match strengths.",
+        {"checked_batches": checked, "batch_execution_gate": gate},
+    )
+
+
 def run_validation(config: Config) -> dict[str, Any]:
     """Run every validation check against the current persisted state."""
     import_events = db.all_import_events()
@@ -259,6 +332,7 @@ def run_validation(config: Config) -> dict[str, Any]:
     cleanup_events = db.all_cleanup_events()
     recommendations = db.all_recommendations()
     executions = db.all_cleanup_executions(limit=5000)
+    batches = db.all_cleanup_execution_batches(limit=5000)
     completed_index = latest_completed_execution_index(executions)
     recommendation_cleanup_events = [
         event
@@ -279,6 +353,7 @@ def run_validation(config: Config) -> dict[str, Any]:
             db.all_traces(),
             executions,
         ),
+        validate_batch_execution_safety(config, batches),
     ]
     overall = OK
     if any(c["status"] == FAIL for c in checks):

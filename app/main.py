@@ -43,6 +43,8 @@ from .cleanup_review import (
 from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
 from .cleanup_execution import (
+    batch_dry_run as cleanup_execution_batch_dry_run,
+    batch_execute as cleanup_execution_batch_execute,
     config_status as cleanup_execution_config_status,
     dry_run as cleanup_execution_dry_run,
     execute as cleanup_execute,
@@ -385,6 +387,7 @@ async def api_cleanup_executions(limit: int = 100) -> JSONResponse:
         {
             "config": cleanup_execution_config_status(config),
             "executions": db.all_cleanup_executions(limit=max(1, min(limit, 500))),
+            "batches": db.all_cleanup_execution_batches(limit=max(1, min(limit, 500))),
         }
     )
 
@@ -400,6 +403,33 @@ async def api_cleanup_execute_dry_run(payload: dict) -> JSONResponse:
         library_artifacts=db.all_library_artifacts(),
         traces=db.all_traces(),
         config=get_config(),
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/cleanup/execute/batch-dry-run")
+async def api_cleanup_execute_batch_dry_run(payload: dict) -> JSONResponse:
+    raw_items = payload.get("items")
+    items = raw_items if isinstance(raw_items, list) else []
+    result = cleanup_execution_batch_dry_run(
+        items=items,
+        confirmation=str(payload.get("confirmation") or ""),
+        cleanup_events=db.all_cleanup_events(),
+        import_events=db.all_import_events(),
+        library_artifacts=db.all_library_artifacts(),
+        traces=db.all_traces(),
+        config=get_config(),
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/cleanup/execute/batch")
+async def api_cleanup_execute_batch(payload: dict) -> JSONResponse:
+    result = cleanup_execution_batch_execute(
+        plan_id=str(payload.get("plan_id") or ""),
+        confirmation=str(payload.get("confirmation") or ""),
+        config=get_config(),
+        post_execute_poll=poll_once,
     )
     return JSONResponse(result)
 

@@ -59,8 +59,11 @@ DEFAULTS: dict[str, Any] = {
     "cleanup_execution": {
         "enabled": False,
         "allow_single_item_execution": False,
+        "allow_batch_execution": False,
         "require_confirmation_phrase": True,
+        "require_batch_dry_run": True,
         "max_items_per_request": 1,
+        "max_batch_items": 5,
         "allowed_review_class": "Safe Review Candidate",
         "allowed_match_strengths": [
             "Exact Hash/DownloadId Match",

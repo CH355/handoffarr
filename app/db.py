@@ -173,6 +173,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS cleanup_executions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 execution_id TEXT,
+                batch_id TEXT,
                 media_id TEXT,
                 media_title TEXT,
                 qbit_hash TEXT,
@@ -186,6 +187,20 @@ def init_db() -> None:
                 evidence_json TEXT,
                 created_at TEXT,
                 completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS cleanup_execution_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT,
+                status TEXT,
+                item_count INTEGER,
+                completed_count INTEGER,
+                failed_count INTEGER,
+                planned_recoverable_bytes INTEGER,
+                actual_recovered_bytes INTEGER,
+                created_at TEXT,
+                completed_at TEXT,
+                evidence_json TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
@@ -224,9 +239,12 @@ def init_db() -> None:
                 ON cleanup_executions (created_at);
             CREATE INDEX IF NOT EXISTS idx_cleanup_executions_media
                 ON cleanup_executions (media_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_cleanup_execution_batches_batch
+                ON cleanup_execution_batches (batch_id, created_at);
             """
         )
         _migrate_handoff_traces(conn)
+        _migrate_cleanup_executions(conn)
     logger.info("Database initialized at %s", DB_PATH)
 
 
@@ -265,6 +283,25 @@ def _migrate_handoff_traces(conn: sqlite3.Connection) -> None:
         if name not in existing:
             conn.execute(f"ALTER TABLE handoff_traces ADD COLUMN {name} {col_type}")
             logger.info("Migrated handoff_traces: added column %s", name)
+
+
+_CLEANUP_EXECUTION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("batch_id", "TEXT"),
+)
+
+
+def _migrate_cleanup_executions(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(cleanup_executions)")}
+    for name, col_type in _CLEANUP_EXECUTION_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE cleanup_executions ADD COLUMN {name} {col_type}")
+            logger.info("Migrated cleanup_executions: added column %s", name)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cleanup_executions_batch
+            ON cleanup_executions (batch_id, created_at)
+        """
+    )
 
 
 def insert_raw_event(
@@ -841,14 +878,15 @@ def insert_cleanup_execution(execution: dict[str, Any]) -> None:
         conn.execute(
             """
             INSERT INTO cleanup_executions
-                (execution_id, media_id, media_title, qbit_hash, review_class,
+                (execution_id, batch_id, media_id, media_title, qbit_hash, review_class,
                  match_strength, requested_action, execution_status,
                  recoverable_bytes, confirmation_phrase, blocking_reasons_json,
                  evidence_json, created_at, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 execution.get("execution_id"),
+                execution.get("batch_id"),
                 str(execution.get("media_id"))
                 if execution.get("media_id") is not None
                 else None,
@@ -913,3 +951,95 @@ def all_cleanup_executions(limit: int = 100) -> list[dict[str, Any]]:
                 item[public_key] = default
         executions.append(item)
     return executions
+
+
+def insert_cleanup_execution_batch(batch: dict[str, Any]) -> None:
+    created_default = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO cleanup_execution_batches
+                (batch_id, status, item_count, completed_count, failed_count,
+                 planned_recoverable_bytes, actual_recovered_bytes, created_at,
+                 completed_at, evidence_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                batch.get("batch_id"),
+                batch.get("status"),
+                batch.get("item_count"),
+                batch.get("completed_count", 0),
+                batch.get("failed_count", 0),
+                batch.get("planned_recoverable_bytes"),
+                batch.get("actual_recovered_bytes", 0),
+                batch.get("created_at") or created_default,
+                batch.get("completed_at"),
+                json.dumps(batch.get("evidence") or {}, default=str),
+            ),
+        )
+
+
+def update_cleanup_execution_batch(batch_id: str, updates: dict[str, Any]) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            UPDATE cleanup_execution_batches
+            SET status = ?,
+                completed_count = ?,
+                failed_count = ?,
+                actual_recovered_bytes = ?,
+                completed_at = ?,
+                evidence_json = ?
+            WHERE batch_id = ?
+            """,
+            (
+                updates.get("status"),
+                updates.get("completed_count", 0),
+                updates.get("failed_count", 0),
+                updates.get("actual_recovered_bytes", 0),
+                updates.get("completed_at") or _utcnow(),
+                json.dumps(updates.get("evidence") or {}, default=str),
+                batch_id,
+            ),
+        )
+
+
+def cleanup_execution_batch(batch_id: str) -> dict[str, Any] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM cleanup_execution_batches WHERE batch_id = ? ORDER BY id DESC LIMIT 1",
+            (batch_id,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    raw = item.pop("evidence_json", None)
+    if raw:
+        try:
+            item["evidence"] = json.loads(raw)
+        except (TypeError, ValueError):
+            item["evidence"] = {}
+    else:
+        item["evidence"] = {}
+    return item
+
+
+def all_cleanup_execution_batches(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM cleanup_execution_batches ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw = item.pop("evidence_json", None)
+        if raw:
+            try:
+                item["evidence"] = json.loads(raw)
+            except (TypeError, ValueError):
+                item["evidence"] = {}
+        else:
+            item["evidence"] = {}
+        out.append(item)
+    return out

@@ -56,8 +56,11 @@ cleanup_review:
 cleanup_execution:
   enabled: false
   allow_single_item_execution: false
+  allow_batch_execution: false
   require_confirmation_phrase: true
+  require_batch_dry_run: true
   max_items_per_request: 1
+  max_batch_items: 5
   allowed_review_class: "Safe Review Candidate"
   allowed_match_strengths:
     - "Exact Hash/DownloadId Match"

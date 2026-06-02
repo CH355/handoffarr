@@ -22,6 +22,7 @@
       border-radius: 6px; cursor: pointer; font-size: 13px;
     }
     button:hover { background: #3a78ec; }
+    button:disabled { background: #30343b; color: #777f8b; cursor: not-allowed; }
     main { padding: 24px; }
     .notice {
       background: #3a2f17; border: 1px solid #6b5418; color: #f1d99a;
@@ -179,6 +180,10 @@
     .review-unknown { background: #262a31; color: #9aa0a6; }
     .review-cleaned { background: #1f2937; color: #c4c8cd; }
     .review-table td { max-width: 340px; }
+    .purge-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+    .purge-badge { font-size: 12px; padding: 2px 8px; border-radius: 12px; background: #1f2937; color: #c4c8cd; }
+    .purge-badge.ok { background: #11331f; color: #7ee2a8; }
+    .purge-badge.warn { background: #3a2f17; color: #f1d99a; }
     .review-title { font-weight: 600; }
     .review-reason { color: #c4c8cd; }
     .raw-details summary { cursor: pointer; color: #9aa0a6; font-size: 12px; }
@@ -264,6 +269,45 @@
           </thead>
           <tbody id="cleanup-review-body"></tbody>
         </table>
+      </section>
+
+      <section id="cleanup-purge-card" class="queue-card">
+        <h2>Cleanup Purge Queue</h2>
+        <div class="queue-stats">
+          <div class="stat"><span class="num" id="cp-selected-count">0</span><span class="lbl">Selected</span></div>
+          <div class="stat"><span class="num" id="cp-selected-bytes">0 B</span><span class="lbl">Selected recoverable</span></div>
+          <div class="stat"><span class="num" id="cp-max">-</span><span class="lbl">Max batch</span></div>
+          <div class="stat"><span class="num" id="cp-gate">-</span><span class="lbl">Batch gate</span></div>
+        </div>
+        <div class="card-row"><span class="card-label">Safety</span><span>Only Safe Review Candidates with allowed match strength can be selected. Handoffarr deletes no library files and executes one qBittorrent removal at a time.</span></div>
+        <div class="card-row" id="cp-status">Loading purge queue.</div>
+        <div class="purge-controls">
+          <button id="cp-dry-run" disabled>Dry-run selected</button>
+          <button id="cp-execute" disabled>Purge selected</button>
+          <span class="purge-badge" id="cp-plan">No dry-run plan</span>
+        </div>
+        <table class="review-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Title</th>
+              <th>Recoverable</th>
+              <th>Match strength</th>
+              <th>qBittorrent hash</th>
+              <th>Evidence</th>
+            </tr>
+          </thead>
+          <tbody id="cleanup-purge-body"></tbody>
+        </table>
+        <details class="raw-details">
+          <summary>Risky candidates read-only</summary>
+          <table class="review-table">
+            <thead>
+              <tr><th>Title</th><th>Recoverable</th><th>Match strength</th><th>Reason</th></tr>
+            </thead>
+            <tbody id="cleanup-purge-risky-body"></tbody>
+          </table>
+        </details>
       </section>
 
       <section id="cleanup-action-plan-card" class="queue-card">
@@ -615,6 +659,153 @@
       if (name === 'Missing Library Candidate') return 'review-missing';
       if (name === 'Already Cleaned') return 'review-cleaned';
       return 'review-unknown';
+    }
+
+    let purgeCandidates = [];
+    let purgeConfig = {};
+    let purgePlanId = null;
+
+    function selectedPurgeItems() {
+      return purgeCandidates.filter(item => {
+        const cb = document.querySelector('.cp-select[data-media-id="' + CSS.escape(String(item.media_id || '')) + '"]');
+        return cb && cb.checked;
+      });
+    }
+
+    function updatePurgeSelection() {
+      const selected = selectedPurgeItems();
+      const bytes = selected.reduce((sum, item) => sum + Number(item.recoverable_bytes || 0), 0);
+      document.getElementById('cp-selected-count').textContent = selected.length;
+      document.getElementById('cp-selected-bytes').textContent = formatBytes(bytes);
+      purgePlanId = null;
+      const plan = document.getElementById('cp-plan');
+      if (plan) {
+        plan.textContent = 'No dry-run plan';
+        plan.className = 'purge-badge';
+      }
+      const dryRun = document.getElementById('cp-dry-run');
+      const execute = document.getElementById('cp-execute');
+      const max = Number(purgeConfig.max_batch_items || 5);
+      if (dryRun) dryRun.disabled = selected.length === 0 || selected.length > max;
+      if (execute) execute.disabled = true;
+    }
+
+    function purgeGateText(config) {
+      if (!config.enabled) return 'Execution disabled';
+      if (!config.allow_batch_execution) return 'Batch disabled';
+      return 'Enabled';
+    }
+
+    async function loadCleanupPurgeCard() {
+      const card = document.getElementById('cleanup-purge-card');
+      if (!card) return;
+      let safeData = {};
+      let riskyData = {};
+      let execData = {};
+      try {
+        [safeData, riskyData, execData] = await Promise.all([
+          fetch('/api/cleanup/review?review_class=Safe%20Review%20Candidate&limit=10').then(r => r.json()),
+          fetch('/api/cleanup/review?review_class=Risky%20Review%20Candidate&limit=5').then(r => r.json()),
+          fetch('/api/cleanup/executions?limit=10').then(r => r.json()),
+        ]);
+      } catch (e) { return; }
+      purgeConfig = execData.config || {};
+      purgeCandidates = (safeData.candidates || safeData.top_candidates || []).filter(item =>
+        item.review_class === 'Safe Review Candidate' &&
+        (purgeConfig.allowed_match_strengths || []).includes(item.match_strength)
+      );
+      document.getElementById('cp-max').textContent = purgeConfig.max_batch_items ?? '-';
+      document.getElementById('cp-gate').textContent = purgeGateText(purgeConfig);
+      document.getElementById('cp-status').textContent =
+        purgeConfig.enabled && purgeConfig.allow_batch_execution
+          ? 'Batch purge is enabled. Dry-run selected candidates before purge.'
+          : 'Purge is blocked by config. Dry-run remains available.';
+
+      const body = document.getElementById('cleanup-purge-body');
+      body.innerHTML = '';
+      if (!purgeCandidates.length) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td colspan="6" class="muted">No safe purge candidates available.</td>';
+        body.appendChild(tr);
+      }
+      purgeCandidates.forEach(item => {
+        const tr = document.createElement('tr');
+        const shortHash = String(item.qbit_hash || item.torrent_hash || '').slice(0, 12);
+        tr.innerHTML =
+          '<td><input type="checkbox" class="cp-select"></td>' +
+          '<td><div class="review-title"></div><div class="muted"></div></td>' +
+          '<td></td><td></td><td></td><td><span class="purge-badge ok"></span></td>';
+        const cb = tr.querySelector('input');
+        cb.dataset.mediaId = item.media_id || '';
+        cb.addEventListener('change', updatePurgeSelection);
+        tr.querySelector('.review-title').textContent = item.media_title || item.media_id || 'unknown';
+        tr.querySelector('.muted').textContent = item.media_id || '';
+        tr.children[2].textContent = formatBytes(item.recoverable_bytes);
+        tr.children[3].textContent = item.match_strength || '-';
+        tr.children[4].textContent = shortHash;
+        tr.querySelector('.purge-badge').textContent = item.evidence_strength || 'Strong';
+        body.appendChild(tr);
+      });
+
+      const riskyBody = document.getElementById('cleanup-purge-risky-body');
+      riskyBody.innerHTML = '';
+      (riskyData.candidates || riskyData.top_candidates || []).slice(0, 5).forEach(item => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td></td><td></td><td></td><td class="review-reason"></td>';
+        tr.children[0].textContent = item.media_title || item.media_id || 'unknown';
+        tr.children[1].textContent = formatBytes(item.recoverable_bytes);
+        tr.children[2].textContent = item.match_strength || '-';
+        tr.children[3].textContent = item.reason || '-';
+        riskyBody.appendChild(tr);
+      });
+      updatePurgeSelection();
+    }
+
+    async function dryRunPurgeSelected() {
+      const selected = selectedPurgeItems();
+      const payload = {
+        confirmation: 'DRY RUN BATCH CLEANUP',
+        items: selected.map(item => ({ media_id: String(item.media_id), qbit_hash: item.qbit_hash || item.torrent_hash })),
+      };
+      let data;
+      try {
+        data = await fetch('/api/cleanup/execute/batch-dry-run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).then(r => r.json());
+      } catch (e) { return; }
+      const plan = document.getElementById('cp-plan');
+      if (data.allowed) {
+        purgePlanId = data.plan_id;
+        plan.textContent = 'Dry-run OK · ' + formatBytes(data.total_recoverable_bytes);
+        plan.className = 'purge-badge ok';
+        document.getElementById('cp-execute').disabled =
+          !(purgeConfig.enabled && purgeConfig.allow_batch_execution);
+      } else {
+        purgePlanId = null;
+        plan.textContent = 'Dry-run blocked';
+        plan.className = 'purge-badge warn';
+        document.getElementById('cp-execute').disabled = true;
+      }
+    }
+
+    async function executePurgePlan() {
+      if (!purgePlanId) return;
+      const confirmation = window.prompt('Type EXECUTE BATCH CLEANUP to purge selected qBittorrent items.');
+      if (confirmation !== 'EXECUTE BATCH CLEANUP') return;
+      const data = await fetch('/api/cleanup/execute/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan_id: purgePlanId, confirmation }),
+      }).then(r => r.json());
+      const plan = document.getElementById('cp-plan');
+      plan.textContent = data.batch_status || 'Batch complete';
+      plan.className = data.batch_status === 'Completed' ? 'purge-badge ok' : 'purge-badge warn';
+      document.getElementById('cp-execute').disabled = true;
+      loadCleanupPurgeCard();
+      loadCleanupReviewCard();
+      loadCleanupExecutionCard();
     }
 
     async function loadCleanupReviewCard() {
@@ -1301,6 +1492,7 @@
 
     loadOpsView();
     loadCleanupReviewCard();
+    loadCleanupPurgeCard();
     loadCleanupActionPlanCard();
     loadCleanupExecutionCard();
     loadDecisionCard();
@@ -1312,6 +1504,8 @@
     loadLibraryCard();
     loadCleanupCard();
     loadQueueCard();
+    document.getElementById('cp-dry-run')?.addEventListener('click', dryRunPurgeSelected);
+    document.getElementById('cp-execute')?.addEventListener('click', executePurgePlan);
   </script>
 </body>
 </html>
