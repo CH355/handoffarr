@@ -688,7 +688,9 @@
         title.innerHTML = '<div class="review-title"></div><div class="muted"></div>';
         title.querySelector('.review-title').textContent =
           item.media_title || item.media_id || 'unknown';
-        title.querySelector('.muted').textContent = item.torrent_hash || '';
+        const qbitHash = item.qbit_hash || item.torrent_hash ||
+          (((item.evidence || {}).qbittorrent_torrent || {}).torrent_hash) || '';
+        title.querySelector('.muted').textContent = qbitHash;
         size.textContent = formatBytes(item.recoverable_bytes || item.retained_bytes);
         klass.innerHTML = '<span class="review-class"></span>';
         const pill = klass.querySelector('.review-class');
@@ -704,6 +706,8 @@
         details.innerHTML = '<details class="raw-details"><summary>Evidence</summary><pre></pre></details>';
         details.querySelector('pre').textContent = JSON.stringify({
           checks: item.checks || {},
+          qbit_hash: qbitHash,
+          torrent_hash: item.torrent_hash || qbitHash,
           paths: item.paths || {},
           matched_retained_files: item.matched_retained_files || [],
           risk_reasons: item.risk_reasons || [],

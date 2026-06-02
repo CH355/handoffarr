@@ -76,6 +76,29 @@ def _to_int(value: Any) -> int:
         return 0
 
 
+def _candidate_hash(item: dict[str, Any]) -> str | None:
+    evidence = item.get("evidence") or {}
+    qbit = evidence.get("qbittorrent_torrent") or {}
+    files = evidence.get("qbittorrent_files") or {}
+    value = (
+        item.get("qbit_hash")
+        or item.get("torrent_hash")
+        or qbit.get("torrent_hash")
+        or files.get("torrent_hash")
+    )
+    return str(value).lower() if value else None
+
+
+def _with_qbit_hash(item: dict[str, Any]) -> dict[str, Any]:
+    qbit_hash = _candidate_hash(item)
+    if qbit_hash:
+        item["torrent_hash"] = qbit_hash
+        item["qbit_hash"] = qbit_hash
+    else:
+        item.setdefault("qbit_hash", None)
+    return item
+
+
 def _parse_payload(event: dict[str, Any]) -> dict[str, Any]:
     try:
         return json.loads(event.get("payload_json") or "{}")
@@ -440,7 +463,7 @@ def _classify_item(
         "file_evidence_available": file_match["file_evidence_ok"],
     }
 
-    return {
+    return _with_qbit_hash({
         "cleanup_id": cleanup_event.get("cleanup_id"),
         "media_id": cleanup_event.get("media_id"),
         "media_type": (import_event or {}).get("media_type")
@@ -499,7 +522,7 @@ def _classify_item(
             "qbittorrent_files": file_evidence or {},
             "trace": trace or {},
         },
-    }
+    })
 
 
 def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -702,7 +725,7 @@ def cleanup_review_response(
     offset: int = 0,
     sort: str | None = None,
 ) -> dict[str, Any]:
-    active = [item for item in items if not item.get("excluded_by_dedupe")]
+    active = [_with_qbit_hash(item) for item in items if not item.get("excluded_by_dedupe")]
     filtered = _apply_filters(
         active,
         review_class=review_class,
@@ -749,6 +772,7 @@ def _format_bytes(value: Any) -> str:
 
 
 def cleanup_checklist_text(item: dict[str, Any]) -> str:
+    item = _with_qbit_hash(item)
     evidence = item.get("evidence") or {}
     qbit = evidence.get("qbittorrent_torrent") or {}
     files = evidence.get("qbittorrent_files") or {}
@@ -793,7 +817,7 @@ def cleanup_checklist_text(item: dict[str, Any]) -> str:
             "",
             "qBittorrent retained download:",
             f"- Name: {qbit.get('torrent_name') or files.get('torrent_name') or 'unknown'}",
-            f"- Hash: {item.get('torrent_hash') or qbit.get('torrent_hash') or 'unknown'}",
+            f"- qBittorrent hash: {item.get('qbit_hash') or item.get('torrent_hash') or qbit.get('torrent_hash') or 'unknown'}",
             f"- Save path: {qbit.get('save_path') or files.get('save_path') or paths.get('download_path') or 'unknown'}",
             "",
             "Retained file path(s):",
@@ -824,11 +848,14 @@ def cleanup_checklist_text(item: dict[str, Any]) -> str:
 
 
 def manual_review_packet(item: dict[str, Any]) -> dict[str, Any]:
+    item = _with_qbit_hash(item)
     evidence = item.get("evidence") or {}
     return {
         "media_title": item.get("media_title"),
         "media_id": item.get("media_id"),
         "media_type": item.get("media_type"),
+        "torrent_hash": item.get("torrent_hash"),
+        "qbit_hash": item.get("qbit_hash"),
         "review_class": item.get("review_class"),
         "recoverable_bytes": item.get("recoverable_bytes"),
         "match_strength": item.get("match_strength"),
@@ -854,7 +881,11 @@ def manual_review_packet(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def media_cleanup_review_response(media_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-    matching = [item for item in items if str(item.get("media_id")) == str(media_id)]
+    matching = [
+        _with_qbit_hash(item)
+        for item in items
+        if str(item.get("media_id")) == str(media_id)
+    ]
     if not matching:
         return {
             "media_id": media_id,
@@ -876,6 +907,7 @@ def media_cleanup_checklist(media_id: str, items: list[dict[str, Any]]) -> str |
 
 
 def _action_plan_candidate(item: dict[str, Any]) -> dict[str, Any]:
+    item = _with_qbit_hash(item)
     evidence = item.get("evidence") or {}
     qbit = evidence.get("qbittorrent_torrent") or {}
     paths = item.get("paths") or {}
@@ -889,7 +921,8 @@ def _action_plan_candidate(item: dict[str, Any]) -> dict[str, Any]:
         "confidence_score": item.get("confidence_score"),
         "recoverable_bytes": item.get("recoverable_bytes"),
         "qbit_name": qbit.get("torrent_name"),
-        "qbit_hash": item.get("torrent_hash") or qbit.get("torrent_hash"),
+        "qbit_hash": item.get("qbit_hash") or item.get("torrent_hash") or qbit.get("torrent_hash"),
+        "torrent_hash": item.get("torrent_hash"),
         "retained_save_path": qbit.get("save_path") or paths.get("download_path"),
         "library_path": paths.get("library_path"),
         "checklist_url": f"/api/cleanup/review/{item.get('media_id')}/checklist",
