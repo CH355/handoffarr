@@ -79,6 +79,15 @@ def _artifact_from_raw(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _raw_artifact_is_import_success(event: dict[str, Any]) -> bool:
+    payload = _parse_payload(event)
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    return (
+        payload.get("import_status") == IMPORT_SUCCESS
+        or evidence.get("import_status") == IMPORT_SUCCESS
+    )
+
+
 def _status_for_artifact(
     artifact: dict[str, Any],
     import_event: dict[str, Any] | None,
@@ -140,7 +149,7 @@ def build_library_artifacts(config: Config) -> list[dict[str, Any]]:
         event
         for event in db.events_for_source_since("library", since)
         if event.get("event_type") == "artifact"
-        and _parse_payload(event).get("import_status") == IMPORT_SUCCESS
+        and _raw_artifact_is_import_success(event)
     ]
     artifacts = [
         _artifact_from_raw(event)
