@@ -128,6 +128,7 @@ def collect(config: Config) -> int:
     password = svc.get("password", "")
     torrents_endpoint = svc.get("torrents_endpoint", "/api/v2/torrents/info")
     trackers_endpoint = svc.get("trackers_endpoint", "/api/v2/torrents/trackers")
+    collect_trackers = bool(svc.get("collect_trackers", False))
 
     stored = 0
     try:
@@ -150,7 +151,7 @@ def collect(config: Config) -> int:
                     payload = _normalize_torrent_full(t)
 
                     # Optional: fetch trackers for richer diagnosis context.
-                    if torrent_hash and trackers_endpoint:
+                    if collect_trackers and torrent_hash and trackers_endpoint:
                         try:
                             tr = client.get(
                                 f"{base_url}{trackers_endpoint}",
