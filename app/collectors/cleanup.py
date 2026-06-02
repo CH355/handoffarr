@@ -92,11 +92,16 @@ def _build_observations(config: Config, observed_at: str) -> list[dict[str, Any]
         if norm and norm not in torrents_by_title:
             torrents_by_title[norm] = event
 
-    libraries_by_media = {
-        str(artifact.get("media_id")): artifact
-        for artifact in db.all_library_artifacts()
-        if artifact.get("media_id") is not None
-    }
+    libraries_by_media: dict[str, dict[str, Any]] = {}
+    for artifact in db.all_library_artifacts():
+        if artifact.get("media_id") is None:
+            continue
+        media_id = str(artifact.get("media_id"))
+        current = libraries_by_media.get(media_id)
+        if current is None or (
+            bool(artifact.get("file_exists")) and not bool(current.get("file_exists"))
+        ):
+            libraries_by_media[media_id] = artifact
 
     observations: list[dict[str, Any]] = []
     for import_event in db.all_import_events():

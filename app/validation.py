@@ -126,6 +126,8 @@ def validate_cleanup(
     for artifact in artifacts:
         if artifact.get("library_status") != LIBRARY_PRESENT:
             continue
+        if artifact.get("import_status") != IMPORT_SUCCESS:
+            continue
         if not artifact.get("download_copy_present"):
             continue
         media_id = str(artifact.get("media_id") or "")

@@ -140,6 +140,7 @@ def build_library_artifacts(config: Config) -> list[dict[str, Any]]:
         event
         for event in db.events_for_source_since("library", since)
         if event.get("event_type") == "artifact"
+        and _parse_payload(event).get("import_status") == IMPORT_SUCCESS
     ]
     artifacts = [
         _artifact_from_raw(event)
