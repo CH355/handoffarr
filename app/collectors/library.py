@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import db
 from ..config import Config
+from ..imports import IMPORT_SUCCESS
 
 logger = logging.getLogger("handoffarr.collectors.library")
 
@@ -253,6 +254,8 @@ def collect(config: Config) -> int:
     stored = 0
 
     for import_event in db.all_import_events():
+        if import_event.get("import_status") != IMPORT_SUCCESS:
+            continue
         mappings = _path_mappings(config, import_event.get("source_application"))
         artifact = _artifact_from_import(
             import_event, roots, observed_at, max_entries, mappings
@@ -286,6 +289,7 @@ def inspect(config: Config) -> dict[str, Any]:
             _path_mappings(config, import_event.get("source_application")),
         )
         for import_event in db.all_import_events()
+        if import_event.get("import_status") == IMPORT_SUCCESS
     ]
     return {
         "service": SOURCE,

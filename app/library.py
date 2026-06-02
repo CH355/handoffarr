@@ -153,6 +153,8 @@ def build_library_artifacts(config: Config) -> list[dict[str, Any]]:
 
     observed_at = datetime.now(timezone.utc).isoformat()
     for import_event in db.all_import_events():
+        if import_event.get("import_status") != IMPORT_SUCCESS:
+            continue
         media_id = str(import_event.get("media_id") or "")
         if not media_id or media_id in artifacts_by_media:
             continue

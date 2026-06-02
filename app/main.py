@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -55,6 +56,7 @@ from .responsibility import (
     run_responsibility,
     summarize_assessments,
 )
+from .validation import run_validation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -482,3 +484,51 @@ async def debug_library() -> JSONResponse:
 @app.get("/api/debug/imports")
 async def debug_imports() -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(inspect_imports, get_config()))
+
+
+@app.get("/api/validation")
+async def api_validation() -> JSONResponse:
+    config = get_config()
+    result = await asyncio.to_thread(run_validation, config)
+    status_code = 200 if result["status"] != "FAIL" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
+@app.get("/api/debug/export")
+async def api_debug_export() -> JSONResponse:
+    """Bundle the current persisted lifecycle state into a portable package.
+
+    Goal: snapshot Handoffarr's view of production so future debugging does
+    not require live Sonarr / Radarr / qBittorrent access. The shape mirrors
+    the per-domain APIs so a fixture can be replayed against an offline copy
+    of the dashboard or `app/validation.py`.
+    """
+    config = get_config()
+    artifacts = db.all_library_artifacts()
+    cleanup_events = db.all_cleanup_events()
+    import_events = db.all_import_events()
+    recommendations = db.all_recommendations()
+    assessments = db.all_responsibility_assessments()
+    decisions = db.all_decision_assessments()
+    timeline_events = db.all_timeline_events()
+    storage = build_storage_summary(config) if config.is_present else {}
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "config_present": config.is_present,
+        "imports": imports_response(import_events),
+        "library": library_response(artifacts, config),
+        "cleanup": cleanup_response(cleanup_events),
+        "responsibility": {
+            "assessments": assessments,
+            "summary": summarize_assessments(assessments),
+        },
+        "recommendations": {
+            "summary": summarize_recommendations(recommendations),
+            "recommendations": recommendations,
+        },
+        "timeline": timeline.timeline_response(timeline_events),
+        "decisions": decisions_response(decisions),
+        "storage": storage,
+        "validation": await asyncio.to_thread(run_validation, config),
+    }
+    return JSONResponse(payload)

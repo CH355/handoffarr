@@ -135,6 +135,42 @@
     .lifecycle-meta .lbl { color: #9aa0a6; text-transform: uppercase;
                            letter-spacing: 0.03em; font-size: 11px;
                            margin-right: 4px; }
+    /* Executive operational view */
+    .ops-grid { display: grid; gap: 16px; margin-bottom: 24px;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    .ops-panel { background: #181b21; border: 1px solid #2a2e35;
+                 border-radius: 10px; padding: 18px; }
+    .ops-panel h2 { font-size: 13px; margin: 0 0 10px; color: #9aa0a6;
+                    font-weight: 600; text-transform: uppercase;
+                    letter-spacing: 0.04em; }
+    .ops-headline { font-size: 24px; font-weight: 600; margin-bottom: 4px; }
+    .ops-sub { font-size: 12px; color: #9aa0a6; margin-bottom: 12px; }
+    .ops-list { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+    .ops-list li { padding: 6px 0; border-top: 1px solid #23272e;
+                   display: flex; justify-content: space-between; gap: 8px; }
+    .ops-list li:first-child { border-top: 0; }
+    .ops-list .name { color: #e6e8eb; }
+    .ops-list .value { color: #9aa0a6; }
+    .ops-bar { height: 6px; background: #23272e; border-radius: 3px;
+               overflow: hidden; margin-top: 4px; }
+    .ops-bar > span { display: block; height: 100%; background: #2d6cdf; }
+    .ops-validation { font-size: 12px; padding: 4px 10px; border-radius: 12px;
+                      display: inline-block; }
+    .ops-validation.OK { background: #11331f; color: #7ee2a8; }
+    .ops-validation.WARN { background: #3a2f17; color: #f1d99a; }
+    .ops-validation.FAIL { background: #3a1b1b; color: #f1a3a3; }
+    details.drilldown { background: #181b21; border: 1px solid #2a2e35;
+                        border-radius: 10px; margin-bottom: 12px; }
+    details.drilldown > summary {
+      cursor: pointer; padding: 12px 18px; font-size: 13px; color: #9aa0a6;
+      text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+      list-style: none;
+    }
+    details.drilldown > summary::-webkit-details-marker { display: none; }
+    details.drilldown > summary::before { content: '\25B8'; margin-right: 8px;
+      color: #6b7280; }
+    details.drilldown[open] > summary::before { content: '\25BE'; }
+    details.drilldown > .drilldown-body { padding: 0 18px 18px; }
   </style>
 </head>
 <body>
@@ -152,6 +188,41 @@
 
   <main>
     {% if config_present %}
+      <section id="ops-view">
+        <div class="ops-grid">
+          <div class="ops-panel" id="ops-disk-panel">
+            <h2>Why is my disk full?</h2>
+            <div class="ops-headline" id="ops-retained">—</div>
+            <div class="ops-sub" id="ops-retained-sub">retained · <span id="ops-recoverable">—</span> recoverable</div>
+            <ul class="ops-list" id="ops-disk-causes"></ul>
+          </div>
+          <div class="ops-panel" id="ops-action-panel">
+            <h2>What should I do?</h2>
+            <div class="ops-headline" id="ops-top-action">—</div>
+            <div class="ops-sub" id="ops-top-action-sub">—</div>
+            <ul class="ops-list" id="ops-action-list"></ul>
+          </div>
+          <div class="ops-panel" id="ops-responsible-panel">
+            <h2>Who is responsible?</h2>
+            <div class="ops-headline" id="ops-top-domain">—</div>
+            <div class="ops-sub" id="ops-top-domain-sub">—</div>
+            <ul class="ops-list" id="ops-domain-list"></ul>
+          </div>
+          <div class="ops-panel" id="ops-broken-panel">
+            <h2>What is broken?</h2>
+            <div class="ops-headline" id="ops-broken-count">—</div>
+            <div class="ops-sub">
+              <span class="ops-validation" id="ops-validation-status">—</span>
+              <span id="ops-validation-reason"></span>
+            </div>
+            <ul class="ops-list" id="ops-broken-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <details class="drilldown">
+        <summary>Drill down · technical detail</summary>
+        <div class="drilldown-body">
       <section id="decision-card" class="queue-card hidden">
         <h2>Decision Center</h2>
         <div class="card-row" id="decision-summary"></div>
@@ -310,6 +381,8 @@
         </div>
         <ul class="queue-findings" id="q-findings"></ul>
       </section>
+        </div>
+      </details>
     {% endif %}
     {% if not config_present %}
       <div class="notice">
@@ -330,6 +403,9 @@
         or click <em>Poll now</em>.
       </div>
     {% else %}
+      <details class="drilldown">
+        <summary>Drill down · handoff traces ({{ traces|length }})</summary>
+        <div class="drilldown-body">
       <table>
         <thead>
           <tr>
@@ -403,6 +479,8 @@
           {% endfor %}
         </tbody>
       </table>
+        </div>
+      </details>
     {% endif %}
   </main>
 
@@ -816,6 +894,121 @@
       }
     }
 
+    async function loadOpsView() {
+      let storage = {}, cleanup = {}, imports = {}, library = {}, recs = {}, resp = {}, val = {};
+      try { storage = await (await fetch('/api/storage')).json(); } catch (e) {}
+      try { cleanup = await (await fetch('/api/cleanup')).json(); } catch (e) {}
+      try { imports = await (await fetch('/api/imports')).json(); } catch (e) {}
+      try { library = await (await fetch('/api/library')).json(); } catch (e) {}
+      try { recs = await (await fetch('/api/recommendations')).json(); } catch (e) {}
+      try { resp = await (await fetch('/api/responsibility')).json(); } catch (e) {}
+      try { val = await (await fetch('/api/validation')).json(); } catch (e) {}
+
+      const storageSummary = storage.summary || {};
+      const cleanupSummary = cleanup.summary || {};
+      const importSummary = imports.summary || {};
+      const librarySummary = library.summary || {};
+      const recSummary = recs.summary || {};
+
+      // Panel 1: Why is my disk full?
+      document.getElementById('ops-retained').textContent = formatBytes(storageSummary.retained_bytes);
+      document.getElementById('ops-recoverable').textContent = formatBytes(cleanupSummary.total_recoverable_bytes);
+      const causes = [
+        { name: 'Cleanup Pending', value: cleanupSummary.pending || 0,
+          detail: formatBytes(cleanupSummary.total_recoverable_bytes) },
+        { name: 'Library Missing', value: librarySummary.missing || 0,
+          detail: (librarySummary.missing || 0) + ' item(s)' },
+        { name: 'Import Failures', value: importSummary.failed || 0,
+          detail: (importSummary.failed || 0) + ' item(s)' },
+      ].filter(c => c.value > 0);
+      const causeList = document.getElementById('ops-disk-causes');
+      causeList.innerHTML = '';
+      if (causes.length === 0) {
+        causeList.innerHTML = '<li><span class="name">Nothing flagged</span><span class="value">—</span></li>';
+      }
+      causes.forEach(c => {
+        const li = document.createElement('li');
+        li.innerHTML = '<span class="name">' + c.name + '</span><span class="value">' + c.detail + '</span>';
+        causeList.appendChild(li);
+      });
+
+      // Panel 2: What should I do?
+      const recList = (recs.recommendations || []).slice(0, 5);
+      const top = recList[0];
+      document.getElementById('ops-top-action').textContent =
+        top ? (top.title || top.recommended_action || '—') : 'Nothing urgent';
+      document.getElementById('ops-top-action-sub').textContent =
+        top ? ((top.priority || 'Low') + ' priority · ' + formatImpact(top.expected_impact))
+            : (recSummary.total ? '' : 'No recommendations.');
+      const actionList = document.getElementById('ops-action-list');
+      actionList.innerHTML = '';
+      recList.forEach(r => {
+        const li = document.createElement('li');
+        const prio = '<span class="prio ' + (PRIO_CLASS[r.priority] || 'prio-low') + '">' +
+          (r.priority || '—') + '</span>';
+        li.innerHTML = '<span class="name">' + prio + ' ' + (r.title || '—') +
+          '</span><span class="value">' + formatImpact(r.expected_impact) + '</span>';
+        actionList.appendChild(li);
+      });
+
+      // Panel 3: Who is responsible?
+      const assessments = resp.assessments || [];
+      const domainCounts = {};
+      assessments.forEach(a => {
+        const d = a.responsible_domain || 'Unknown';
+        domainCounts[d] = (domainCounts[d] || 0) + 1;
+      });
+      const totalDomain = assessments.length || 1;
+      const ranked = Object.entries(domainCounts).sort((a, b) => b[1] - a[1]);
+      const topDomain = ranked[0];
+      document.getElementById('ops-top-domain').textContent =
+        topDomain ? topDomain[0] : 'Nobody';
+      document.getElementById('ops-top-domain-sub').textContent =
+        topDomain ? (Math.round(100 * topDomain[1] / totalDomain) + '% of open assessments')
+                  : 'No responsibility assessments.';
+      const domainList = document.getElementById('ops-domain-list');
+      domainList.innerHTML = '';
+      ranked.forEach(([name, count]) => {
+        const pct = Math.round(100 * count / totalDomain);
+        const li = document.createElement('li');
+        li.innerHTML = '<span class="name">' + name + '</span>' +
+          '<span class="value">' + pct + '% (' + count + ')<div class="ops-bar"><span style="width:' + pct + '%"></span></div></span>';
+        domainList.appendChild(li);
+      });
+
+      // Panel 4: What is broken?
+      const broken = [
+        { name: 'Library Missing', value: librarySummary.missing || 0 },
+        { name: 'Import Failures', value: importSummary.failed || 0 },
+        { name: 'Stalled Torrents', value: 0 },
+        { name: 'Cleanup Failed', value: cleanupSummary.failed || 0 },
+      ];
+      try {
+        const qr = await (await fetch('/api/debug/queue')).json();
+        broken[2].value = (qr && qr.summary && qr.summary.stalled_downloads) || 0;
+      } catch (e) {}
+      const totalBroken = broken.reduce((acc, b) => acc + b.value, 0);
+      document.getElementById('ops-broken-count').textContent = totalBroken + ' broken';
+      const valStatus = val.status || 'WARN';
+      const valEl = document.getElementById('ops-validation-status');
+      valEl.textContent = 'Validation ' + valStatus;
+      valEl.className = 'ops-validation ' + valStatus;
+      const firstFail = (val.checks || []).find(c => c.status === 'FAIL');
+      document.getElementById('ops-validation-reason').textContent =
+        firstFail ? ' · ' + firstFail.name + ': ' + firstFail.reason : '';
+      const brokenList = document.getElementById('ops-broken-list');
+      brokenList.innerHTML = '';
+      broken.filter(b => b.value > 0).forEach(b => {
+        const li = document.createElement('li');
+        li.innerHTML = '<span class="name">' + b.name + '</span><span class="value">' + b.value + '</span>';
+        brokenList.appendChild(li);
+      });
+      if (broken.every(b => b.value === 0)) {
+        brokenList.innerHTML = '<li><span class="name">Everything healthy</span><span class="value">—</span></li>';
+      }
+    }
+
+    loadOpsView();
     loadDecisionCard();
     loadLifecycleCard();
     loadRecommendationsCard();
