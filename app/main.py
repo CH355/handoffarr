@@ -13,8 +13,9 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -81,6 +82,19 @@ logger = logging.getLogger("handoffarr")
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# Built React assets are copied into <repo>/frontend_dist by the Docker build.
+# For local non-Docker runs the Vite build emits to <repo>/frontend/dist; pick
+# whichever exists, with an env var as a final override.
+_REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
+_DEFAULT_DIST = os.path.join(_REPO_ROOT, "frontend_dist")
+if not os.path.isdir(_DEFAULT_DIST):
+    _local_dist = os.path.join(_REPO_ROOT, "frontend", "dist")
+    if os.path.isdir(_local_dist):
+        _DEFAULT_DIST = _local_dist
+FRONTEND_DIST_DIR = os.environ.get("HANDOFFARR_FRONTEND_DIST", _DEFAULT_DIST)
+FRONTEND_INDEX = os.path.join(FRONTEND_DIST_DIR, "index.html")
+FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 
 # Module-level state, set during startup.
 _config: Config | None = None
@@ -225,25 +239,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Handoffarr", lifespan=lifespan)
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health() -> JSONResponse:
     config = get_config()
     return JSONResponse({"status": "ok", "config_present": config.is_present})
-
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request) -> HTMLResponse:
-    config = get_config()
-    traces = db.all_traces() if config.is_present else []
-    return templates.TemplateResponse(
-        "dashboard.html",
-        {
-            "request": request,
-            "config_present": config.is_present,
-            "config_path": config.path,
-            "traces": traces,
-        },
-    )
 
 
 @app.get("/timeline", response_class=HTMLResponse)
@@ -724,3 +723,39 @@ async def api_debug_export() -> JSONResponse:
         "validation": await asyncio.to_thread(run_validation, config),
     }
     return JSONResponse(payload)
+
+
+# --- React SPA static hosting --------------------------------------------
+# Built assets are produced by `npm run build` in /frontend and copied into
+# FRONTEND_DIST_DIR by the Docker image. The /assets mount serves hashed JS/CSS
+# referenced by index.html; the catch-all below returns index.html for any
+# non-API route so React Router can resolve client-side paths (/, /recover,
+# /library, /library/123, /health, ...).
+
+if os.path.isdir(FRONTEND_ASSETS_DIR):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=FRONTEND_ASSETS_DIR),
+        name="frontend-assets",
+    )
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str) -> FileResponse:
+    if full_path.startswith("api/") or full_path.startswith("assets/"):
+        raise HTTPException(status_code=404)
+    # Serve top-level static files emitted by Vite (favicon, vite.svg, etc.)
+    # before falling through to the SPA shell.
+    if full_path:
+        candidate = os.path.normpath(os.path.join(FRONTEND_DIST_DIR, full_path))
+        if (
+            candidate.startswith(os.path.normpath(FRONTEND_DIST_DIR) + os.sep)
+            and os.path.isfile(candidate)
+        ):
+            return FileResponse(candidate)
+    if not os.path.isfile(FRONTEND_INDEX):
+        raise HTTPException(
+            status_code=503,
+            detail="Frontend build is missing. Run `npm run build` in /frontend.",
+        )
+    return FileResponse(FRONTEND_INDEX)
