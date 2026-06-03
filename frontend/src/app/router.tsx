@@ -8,6 +8,7 @@ import { PreviewPage } from "@/features/recover/PreviewPage";
 import { CleanupHistoryPage } from "@/features/recover/CleanupHistoryPage";
 import { CleanupBatchDetailPage } from "@/features/recover/CleanupBatchDetailPage";
 import { LibraryPage } from "@/features/library/LibraryPage";
+import { ItemDetailSurface } from "@/features/itemDetail/ItemDetailSurface";
 import { HealthPage } from "@/features/health/HealthPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 
@@ -25,7 +26,11 @@ export const router = createBrowserRouter([
       { path: "recover/preview", element: <PreviewPage /> },
       { path: "recover/history", element: <CleanupHistoryPage /> },
       { path: "recover/history/:batchId", element: <CleanupBatchDetailPage /> },
-      { path: "library", element: <LibraryPage /> },
+      {
+        path: "library",
+        element: <LibraryPage />,
+        children: [{ path: ":mediaId", element: <ItemDetailSurface /> }],
+      },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
