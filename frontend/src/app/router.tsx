@@ -10,6 +10,7 @@ import { CleanupBatchDetailPage } from "@/features/recover/CleanupBatchDetailPag
 import { LibraryPage } from "@/features/library/LibraryPage";
 import { ItemDetailSurface } from "@/features/itemDetail/ItemDetailSurface";
 import { HealthPage } from "@/features/health/HealthPage";
+import { IntegrationDetailPage } from "@/features/health/IntegrationDetailPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
@@ -32,6 +33,10 @@ export const router = createBrowserRouter([
         children: [{ path: ":mediaId", element: <ItemDetailSurface /> }],
       },
       { path: "health", element: <HealthPage /> },
+      {
+        path: "health/integrations/:integrationId",
+        element: <IntegrationDetailPage />,
+      },
       { path: "settings", element: <SettingsPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
