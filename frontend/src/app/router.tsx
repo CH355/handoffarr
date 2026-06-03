@@ -2,12 +2,17 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { HomePage } from "@/features/home/HomePage";
 import { RecoverSpacePage } from "@/features/recover/RecoverSpacePage";
+import { SafeCandidateReviewPage } from "@/features/recover/SafeCandidateReviewPage";
+import { ItemJudgmentPage } from "@/features/recover/ItemJudgmentPage";
+import { PreviewPage } from "@/features/recover/PreviewPage";
+import { CleanupHistoryPage } from "@/features/recover/CleanupHistoryPage";
+import { CleanupBatchDetailPage } from "@/features/recover/CleanupBatchDetailPage";
 import { LibraryPage } from "@/features/library/LibraryPage";
 import { HealthPage } from "@/features/health/HealthPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
-   Sprint 1 wires only the five primary nav routes; sub-routes land in later sprints. */
+   Sprint 3 adds the Recover Space sub-routes (§4.2). */
 export const router = createBrowserRouter([
   {
     path: "/",
@@ -15,6 +20,11 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <HomePage /> },
       { path: "recover", element: <RecoverSpacePage /> },
+      { path: "recover/safe", element: <SafeCandidateReviewPage /> },
+      { path: "recover/judgment", element: <ItemJudgmentPage /> },
+      { path: "recover/preview", element: <PreviewPage /> },
+      { path: "recover/history", element: <CleanupHistoryPage /> },
+      { path: "recover/history/:batchId", element: <CleanupBatchDetailPage /> },
       { path: "library", element: <LibraryPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },
