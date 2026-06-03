@@ -1,0 +1,93 @@
+/* Foundation tokens — visual-design-foundation-v1.md §2–§7. Do not improvise. */
+
+:root,
+[data-theme="light"] {
+  /* Neutrals — warm-tinted grayscale */
+  --bg: oklch(0.985 0.003 70);
+  --surface: oklch(1 0 0);
+  --surface-raised: oklch(1 0 0);
+  --border: oklch(0.92 0.004 70);
+  --border-strong: oklch(0.85 0.005 70);
+  --text: oklch(0.22 0.006 70);
+  --text-muted: oklch(0.48 0.006 70);
+  --text-subtle: oklch(0.62 0.005 70);
+
+  /* Accent — Indigo */
+  --accent: oklch(0.56 0.18 268);
+  --accent-hover: oklch(0.5 0.19 268);
+  --accent-quiet: oklch(0.96 0.02 268);
+  --accent-on: oklch(0.99 0 0);
+
+  /* Semantic */
+  --success: oklch(0.58 0.14 152);
+  --success-quiet: oklch(0.96 0.04 152);
+  --caution: oklch(0.74 0.15 75);
+  --caution-quiet: oklch(0.96 0.04 75);
+  --critical: oklch(0.58 0.2 25);
+  --critical-quiet: oklch(0.96 0.04 25);
+
+  /* Elevation */
+  --elev-1: 0 1px 2px oklch(0 0 0 / 0.04), 0 1px 1px oklch(0 0 0 / 0.03);
+  --elev-2: 0 8px 24px oklch(0 0 0 / 0.1), 0 2px 4px oklch(0 0 0 / 0.06);
+  --elev-3: 0 24px 48px oklch(0 0 0 / 0.18);
+}
+
+[data-theme="dark"] {
+  --bg: oklch(0.16 0.004 70);
+  --surface: oklch(0.2 0.005 70);
+  --surface-raised: oklch(0.235 0.006 70);
+  --border: oklch(0.28 0.006 70);
+  --border-strong: oklch(0.35 0.007 70);
+  --text: oklch(0.96 0.004 70);
+  --text-muted: oklch(0.72 0.006 70);
+  --text-subtle: oklch(0.58 0.006 70);
+
+  --accent: oklch(0.66 0.17 268);
+  --accent-hover: oklch(0.72 0.16 268);
+  --accent-quiet: oklch(0.28 0.06 268);
+  --accent-on: oklch(0.16 0.02 268);
+
+  --success: oklch(0.7 0.14 152);
+  --success-quiet: oklch(0.28 0.05 152);
+  --caution: oklch(0.8 0.15 75);
+  --caution-quiet: oklch(0.28 0.05 75);
+  --critical: oklch(0.68 0.2 25);
+  --critical-quiet: oklch(0.28 0.06 25);
+
+  /* Dark mode reduces shadow + adds 1px top highlight on floating surfaces */
+  --elev-1: inset 0 1px 0 oklch(1 0 0 / 0.04), 0 1px 2px oklch(0 0 0 / 0.2);
+  --elev-2: inset 0 1px 0 oklch(1 0 0 / 0.04), 0 8px 24px oklch(0 0 0 / 0.4);
+  --elev-3: inset 0 1px 0 oklch(1 0 0 / 0.04), 0 24px 48px oklch(0 0 0 / 0.55);
+}
+
+:root {
+  /* Typography */
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  /* Spacing — 4px base */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 260ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in: cubic-bezier(0.5, 0, 0.75, 0);
+}
