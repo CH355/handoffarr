@@ -2,6 +2,7 @@ import { Link, useParams } from "react-router-dom";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
+import { BackgroundRefreshStatus } from "@/components/BackgroundRefreshStatus";
 import { formatBytes } from "@/lib/formatBytes";
 import { formatRelativeTime } from "@/lib/formatRelativeTime";
 import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
@@ -11,7 +12,7 @@ import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
    client-side. R-B4: Undo/Restore is a backend gap and is not offered here. */
 export function CleanupBatchDetailPage() {
   const { batchId } = useParams<{ batchId: string }>();
-  const executions = useCleanupExecutionsQuery(500);
+  const executions = useCleanupExecutionsQuery();
 
   if (executions.isLoading) return <LoadingState label="Loading batch" rows={3} />;
   if (executions.isError) {
@@ -55,6 +56,7 @@ export function CleanupBatchDetailPage() {
         <p className="text-meta text-text-muted [font-variant-numeric:tabular-nums]">
           {batch.batch_id}
         </p>
+        <BackgroundRefreshStatus isFetching={executions.isFetching && !executions.isLoading} />
       </header>
 
       <section

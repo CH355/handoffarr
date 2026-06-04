@@ -25,11 +25,11 @@ export function useCleanupReviewQuery(filters: CleanupReviewFilters = {}) {
   });
 }
 
-export function useCleanupExecutionsQuery(limit = 100) {
+export function useCleanupExecutionsQuery() {
   return useQuery({
-    queryKey: ["cleanup", "executions", limit],
-    queryFn: () => getCleanupExecutions(limit),
-    staleTime: 0,
+    queryKey: ["cleanup", "executions"],
+    queryFn: () => getCleanupExecutions(500),
+    staleTime: 15_000,
     refetchOnWindowFocus: true,
   });
 }

@@ -38,8 +38,8 @@ export function useSettingsData() {
   });
   const executions = useQuery({
     queryKey: ["cleanup", "executions"],
-    queryFn: () => getCleanupExecutions(1),
-    staleTime: 60_000,
+    queryFn: () => getCleanupExecutions(500),
+    staleTime: 15_000,
   });
   return { health, qbit, radarr, seerr, storage, executions };
 }

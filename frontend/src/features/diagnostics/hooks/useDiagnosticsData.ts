@@ -8,18 +8,18 @@ import { getTimeline } from "@/api/timelineApi";
 import { getValidation } from "@/api/validationApi";
 
 export function useDiagnosticsData() {
-  const query = <T,>(key: string, fn: () => Promise<T>, staleTime = 30_000) =>
-    useQuery({ queryKey: ["diagnostics", key], queryFn: fn, staleTime, retry: 0 });
+  const query = <T,>(key: readonly string[], fn: () => Promise<T>, staleTime = 30_000) =>
+    useQuery({ queryKey: key, queryFn: fn, staleTime, retry: 0 });
 
   return {
-    validation: query("validation", getValidation),
-    states: query("states", getStates),
-    qbit: query("qbit", getQbitProbe),
-    radarr: query("radarr", getRadarrProbe),
-    seerr: query("seerr", getSeerrProbe),
-    storage: query("storage", getStorage, 60_000),
-    imports: query("imports", listImports, 60_000),
-    executions: query("executions", () => getCleanupExecutions(20)),
-    timeline: query("timeline", getTimeline),
+    validation: query(["validation"], getValidation),
+    states: query(["debug", "states"], getStates),
+    qbit: query(["health", "qbit"], getQbitProbe),
+    radarr: query(["health", "radarr"], getRadarrProbe),
+    seerr: query(["health", "seerr"], getSeerrProbe),
+    storage: query(["storage"], getStorage, 60_000),
+    imports: query(["imports"], listImports, 60_000),
+    executions: query(["cleanup", "executions"], () => getCleanupExecutions(500), 15_000),
+    timeline: query(["timeline"], getTimeline),
   };
 }

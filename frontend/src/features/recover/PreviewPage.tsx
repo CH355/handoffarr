@@ -82,17 +82,31 @@ export function PreviewPage() {
       dispatch({ type: "start" });
     },
     onSuccess: (data) => {
+      const status = String(data.batch_status ?? data.status ?? "");
       const completed = Number(data.completed_count ?? 0);
       const failed = Number(data.failed_count ?? 0);
-      const recovered = Number(data.actual_recovered_bytes ?? 0);
-      dispatch({
-        type: "success",
-        payload: {
-          completedCount: completed,
-          failedCount: failed,
-          recoveredBytes: recovered,
-        },
-      });
+      const recovered = Number(
+        data.total_recovered_bytes ?? data.actual_recovered_bytes ?? 0,
+      );
+      if (status.toLowerCase().includes("blocked")) {
+        dispatch({
+          type: "blocked",
+          payload: {
+            message:
+              data.blocking_reasons?.join(" ")
+              || "Backend safety gates blocked this cleanup.",
+          },
+        });
+      } else {
+        dispatch({
+          type: "success",
+          payload: {
+            completedCount: completed,
+            failedCount: failed,
+            recoveredBytes: recovered,
+          },
+        });
+      }
       queryClient.invalidateQueries({ queryKey: ["cleanup"] });
       queryClient.invalidateQueries({ queryKey: ["cleanup", "executions"] });
       queryClient.invalidateQueries({ queryKey: ["storage"] });
@@ -195,6 +209,27 @@ export function PreviewPage() {
         />
       ) : null}
 
+      {dryRun && state.status === "executing" ? (
+        <section
+          role="status"
+          aria-live="polite"
+          aria-label="Cleanup submitted"
+          className="flex flex-col gap-2 rounded-lg border-l-2 border-accent bg-accent-quiet p-4 shadow-elev-1"
+        >
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
+            <div className="h-full w-1/2 animate-pulse rounded-full bg-accent" />
+          </div>
+          <p className="text-subtitle text-text">Cleanup submitted</p>
+          <p className="text-body text-text-muted">
+            Handoffarr is processing the batch on the server. You may leave this
+            page; Cleanup history will show the recorded outcome.
+          </p>
+          <p className="text-meta text-text-muted">
+            Live item progress is not available from the backend.
+          </p>
+        </section>
+      ) : null}
+
       {dryRun && state.status === "partial-fail" ? (
         <SuccessStateBanner
           variant="partial-fail"
@@ -223,6 +258,21 @@ export function PreviewPage() {
             >
               Try again
             </button>
+          }
+        />
+      ) : null}
+
+      {dryRun && state.status === "blocked" ? (
+        <ErrorState
+          title="Cleanup blocked"
+          description={state.errorMessage ?? "Backend safety gates blocked this cleanup."}
+          action={
+            <Link
+              to="/recover/history"
+              className="rounded-md bg-accent px-3 py-1.5 text-body font-medium text-accent-on hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              View history
+            </Link>
           }
         />
       ) : null}

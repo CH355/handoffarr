@@ -8,6 +8,7 @@ export type ExecutionStatus =
   | "confirming"
   | "executing"
   | "succeeded"
+  | "blocked"
   | "partial-fail"
   | "total-fail";
 
@@ -27,6 +28,7 @@ export type ExecutionAction =
       type: "success";
       payload: { completedCount: number; failedCount: number; recoveredBytes: number };
     }
+  | { type: "blocked"; payload: { message: string } }
   | { type: "fail"; payload: { message: string } }
   | { type: "reset" };
 
@@ -45,9 +47,15 @@ export function executionReducer(
       return { ...state, status: "executing" };
     case "success": {
       const { completedCount, failedCount, recoveredBytes } = action.payload;
-      const status: ExecutionStatus = failedCount > 0 ? "partial-fail" : "succeeded";
+      const status: ExecutionStatus = failedCount > 0
+        ? completedCount > 0
+          ? "partial-fail"
+          : "total-fail"
+        : "succeeded";
       return { status, completedCount, failedCount, recoveredBytes };
     }
+    case "blocked":
+      return { status: "blocked", errorMessage: action.payload.message };
     case "fail":
       return { status: "total-fail", errorMessage: action.payload.message };
     case "reset":
