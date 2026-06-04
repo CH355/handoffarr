@@ -4,15 +4,14 @@ import { IntegrationSettingsCard } from "./components/IntegrationSettingsCard";
 import { CleanupSettingsCard } from "./components/CleanupSettingsCard";
 import { RuntimeSettingsCard } from "./components/RuntimeSettingsCard";
 import { AboutCard } from "./components/AboutCard";
+import { ModeSettingsCard } from "./components/ModeSettingsCard";
+import { DiagnosticsSettingsCard } from "./components/DiagnosticsSettingsCard";
+import { useModeStore } from "@/app/stores/useModeStore";
 
-/* Sprint 6 Settings page.
-
-   Configuration visibility surface only. Every value rendered originates
-   from an endpoint that already exists in app/main.py — no invented
-   fields, no fabricated save endpoints, no Diagnostics / Expert chrome
-   (those are out of scope per the sprint brief). All cards degrade
-   independently per frontend-implementation-spec-v1.md §7.2. */
+/* Settings remains a configuration visibility surface. Sprint 7 adds only
+   the client-side Mode control and Expert-gated Diagnostics entry. */
 export function SettingsPage() {
+  const mode = useModeStore((s) => s.mode);
   const { health, qbit, radarr, seerr, storage, executions } = useSettingsData();
 
   return (
@@ -73,6 +72,10 @@ export function SettingsPage() {
         isLoading={storage.isLoading}
         isError={storage.isError}
       />
+
+      <ModeSettingsCard />
+
+      {mode === "expert" ? <DiagnosticsSettingsCard /> : null}
 
       <AboutCard />
     </section>
