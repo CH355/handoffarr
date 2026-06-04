@@ -3,6 +3,7 @@ import {
   getCleanupReview,
   getCleanupSummary,
   getCleanupExecutions,
+  type CleanupExecutionsResponse,
   type CleanupReviewFilters,
 } from "@/api/cleanupApi";
 
@@ -31,5 +32,10 @@ export function useCleanupExecutionsQuery() {
     queryFn: () => getCleanupExecutions(500),
     staleTime: 15_000,
     refetchOnWindowFocus: true,
+    refetchInterval: (query) => hasStartedExecution(query.state.data) ? 5_000 : false,
   });
+}
+
+function hasStartedExecution(data: CleanupExecutionsResponse | undefined) {
+  return data?.executions.some((execution) => execution.execution_status === "Started") ?? false;
 }
