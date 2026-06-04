@@ -179,14 +179,6 @@ function ExecutionHistory({ data, isLoading, isError }: ReturnType<typeof useDia
   );
 }
 
-function activitySummary(timeline: MediaTimeline): string {
-  const latest = [...timeline.stages].sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""))[0];
-  if (!latest) return timeline.outcome ?? "Timeline updated";
-  if (latest.stage === "Import") return `${timeline.media_title ?? "Item"} was imported`;
-  if (latest.stage === "Cleanup") return `${timeline.media_title ?? "Item"} cleanup was reviewed`;
-  return `${timeline.media_title ?? "Item"}: ${latest.stage ?? "Activity"} ${latest.stage_status?.toLowerCase() ?? "updated"}`;
-}
-
 interface ActivityItem {
   id: string;
   timestamp: string | number | null | undefined;
@@ -205,13 +197,23 @@ function RecentActivity({
   validation: ReturnType<typeof useDiagnosticsData>["validation"];
 }) {
   const items = useMemo<ActivityItem[]>(() => {
-    const timelineItems = (timeline.data?.recent_timelines ?? []).map((item) => ({
-      id: item.timeline_id ?? item.media_id ?? activitySummary(item),
-      timestamp: item.latest_timestamp,
-      status: (item.blocked_at ? "warning" : item.outcome === "Complete" ? "healthy" : "unknown") as HealthStatus,
-      summary: activitySummary(item),
-      detail: item.blocked_at ? `Blocked at ${item.blocked_at}` : `Outcome: ${item.outcome ?? "Pending"}`,
-    }));
+    const timelineItems = (timeline.data?.recent_timelines ?? []).flatMap((item: MediaTimeline) =>
+      item.stages
+        .filter((stage) => stage.stage === "Import" || stage.stage === "Cleanup")
+        .map((stage, index) => ({
+          id: `${item.timeline_id ?? item.media_id}-${stage.stage}-${index}`,
+          timestamp: stage.timestamp ?? item.latest_timestamp,
+          status: (stage.stage_status === "Failed"
+            ? "warning"
+            : stage.stage_status === "Complete"
+              ? "healthy"
+              : "unknown") as HealthStatus,
+          summary: stage.stage === "Import"
+            ? `${item.media_title ?? "Item"} import ${stage.stage_status?.toLowerCase() ?? "updated"}`
+            : `${item.media_title ?? "Item"} cleanup review ${stage.stage_status?.toLowerCase() ?? "updated"}`,
+          detail: stage.source ? `Reported by ${stage.source}` : "Lifecycle timeline",
+        })),
+    );
     const executionItems = (executions.data?.executions ?? []).map((item) => ({
       id: item.execution_id,
       timestamp: item.completed_at ?? item.created_at,
