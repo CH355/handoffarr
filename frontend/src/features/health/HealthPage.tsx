@@ -10,11 +10,13 @@ import { ValidationStatusCard } from "./components/ValidationStatusCard";
 import { IntegrationStatusList } from "./components/IntegrationStatusList";
 import { StorageStatusCard } from "./components/StorageStatusCard";
 import { RecentIssuesCard } from "./components/RecentIssuesCard";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 
 /* Sprint 5 Health screen. Monitoring + visibility only — no mutation
    buttons. State handling is per-card; no full-page spinner. */
 export function HealthPage() {
   const { validation, storage, imports, qbit, radarr, seerr } = useHealthData();
+  const queries = [validation, storage, imports, qbit, radarr, seerr];
 
   const integrations = useMemo(
     () =>
@@ -51,6 +53,11 @@ export function HealthPage() {
           Is Handoffarr healthy? Which integrations are healthy? What requires
           attention? This page is read-only.
         </p>
+        <PageRefreshControls
+          dataUpdatedAt={Math.max(...queries.map((query) => query.dataUpdatedAt))}
+          isFetching={queries.some((query) => query.isFetching)}
+          onRefresh={() => { queries.forEach((query) => void query.refetch()); }}
+        />
       </header>
 
       <HealthSummaryBanner

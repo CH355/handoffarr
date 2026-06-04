@@ -10,6 +10,7 @@ import { SortDropdown, type LibrarySort } from "./components/SortDropdown";
 import { LibraryItemRow } from "./components/LibraryItemRow";
 import { useLibraryData } from "./hooks/useLibraryData";
 import { toLibraryItem, type LibraryItem } from "./types";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 
 export function LibraryPage() {
   const query = useLibraryData();
@@ -54,6 +55,11 @@ export function LibraryPage() {
     <>
       <PageContainer title="Library">
         <div className="flex flex-col gap-4">
+          <PageRefreshControls
+            dataUpdatedAt={query.dataUpdatedAt}
+            isFetching={query.isFetching}
+            onRefresh={() => { void query.refetch(); }}
+          />
           <LibrarySearchInput value={search} onChange={setSearch} />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <FilterChipRow value={filter} onChange={setFilter} counts={counts} />

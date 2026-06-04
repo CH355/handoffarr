@@ -107,10 +107,9 @@ export function PreviewPage() {
           },
         });
       }
-      queryClient.invalidateQueries({ queryKey: ["cleanup"] });
+      queryClient.invalidateQueries({ queryKey: ["cleanup"], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["cleanup", "review"] });
       queryClient.invalidateQueries({ queryKey: ["cleanup", "executions"] });
-      queryClient.invalidateQueries({ queryKey: ["storage"] });
-      queryClient.invalidateQueries({ queryKey: ["validation"] });
       sessionStorage.removeItem("recover.batchSelection");
     },
     onError: (err: Error) => {

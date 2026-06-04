@@ -10,6 +10,7 @@ import { useItemDetailData } from "./hooks/useItemDetailData";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
 import type { TimelineStage } from "@/api/timelineApi";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 
 const STAGE_TONE: Record<string, ActivityTimelineEntry["tone"]> = {
   FAILED: "critical",
@@ -58,6 +59,7 @@ export function ItemDetailSurface() {
   const navigate = useNavigate();
   const isTabletPlus = useMediaQuery("(min-width: 768px)");
   const { library, timeline, imports } = useItemDetailData(mediaId);
+  const queries = [library, timeline, imports];
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const evidenceTriggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -105,6 +107,11 @@ export function ItemDetailSurface() {
         />
       ) : (
         <>
+          <PageRefreshControls
+            dataUpdatedAt={Math.max(...queries.map((query) => query.dataUpdatedAt))}
+            isFetching={queries.some((query) => query.isFetching)}
+            onRefresh={() => { queries.forEach((query) => void query.refetch()); }}
+          />
           <ItemDetailHeader artifact={artifact} fallbackTitle={fallbackTitle} />
 
           <section aria-labelledby="recent-activity-heading" className="flex flex-col gap-3">

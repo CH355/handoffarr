@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
-import { BackgroundRefreshStatus } from "@/components/BackgroundRefreshStatus";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 import { formatBytes } from "@/lib/formatBytes";
 import { formatRelativeTime } from "@/lib/formatRelativeTime";
 import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
@@ -33,7 +33,11 @@ export function CleanupHistoryPage() {
         <p className="text-body text-text-muted">
           Every dry-run and execution Handoffarr has recorded.
         </p>
-        <BackgroundRefreshStatus isFetching={executions.isFetching && !executions.isLoading} />
+        <PageRefreshControls
+          dataUpdatedAt={executions.dataUpdatedAt}
+          isFetching={executions.isFetching}
+          onRefresh={() => { void executions.refetch(); }}
+        />
       </header>
 
       {executions.isLoading ? (

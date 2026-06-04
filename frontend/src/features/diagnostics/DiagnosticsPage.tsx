@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, ChevronDown } from "lucide-react";
 import { EmptyState } from "@/components/EmptyState";
@@ -14,6 +14,8 @@ import type { ValidationStatus } from "@/api/validationApi";
 import type { CleanupExecutionRow } from "@/api/cleanupApi";
 import type { MediaTimeline } from "@/api/timelineApi";
 import { useDiagnosticsData } from "./hooks/useDiagnosticsData";
+import { useRefreshPreferencesStore } from "@/app/stores/useRefreshPreferencesStore";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 
 function validationStatus(status: ValidationStatus | undefined): HealthStatus {
   if (status === "OK") return "healthy";
@@ -87,14 +89,21 @@ function CollectorStatus({
   collectors,
   isLoading,
   lastResults,
+  loaded,
+  onLoad,
+  onRefresh,
 }: {
   collectors: IntegrationStatus[];
   isLoading: boolean;
   lastResults: Record<string, number>;
+  loaded: boolean;
+  onLoad: () => void;
+  onRefresh: () => void;
 }) {
   return (
     <Card id="diagnostics-collectors" title="Collector status">
-      {isLoading && collectors.length === 0 ? <LoadingState rows={3} label="Loading collector status" /> :
+      {!loaded ? <ManualLoad label="Load collector status" onLoad={onLoad} /> :
+      isLoading && collectors.length === 0 ? <LoadingState rows={3} label="Loading collector status" /> :
       collectors.length === 0 ? <EmptyState title="No collectors discovered" description="No collector data is currently available." /> :
       <ul className="grid gap-3 md:grid-cols-2">
         {collectors.map((collector) => (
@@ -113,6 +122,7 @@ function CollectorStatus({
           </li>
         ))}
       </ul>}
+      {loaded ? <ManualLoad label="Refresh collector status" onLoad={onRefresh} /> : null}
     </Card>
   );
 }
@@ -191,10 +201,16 @@ function RecentActivity({
   timeline,
   executions,
   validation,
+  loaded,
+  onLoad,
+  onRefresh,
 }: {
   timeline: ReturnType<typeof useDiagnosticsData>["timeline"];
   executions: ReturnType<typeof useDiagnosticsData>["executions"];
   validation: ReturnType<typeof useDiagnosticsData>["validation"];
+  loaded: boolean;
+  onLoad: () => void;
+  onRefresh: () => void;
 }) {
   const items = useMemo<ActivityItem[]>(() => {
     const timelineItems = (timeline.data?.recent_timelines ?? []).flatMap((item: MediaTimeline) =>
@@ -236,7 +252,8 @@ function RecentActivity({
   const isError = timeline.isError && executions.isError && validation.isError;
   return (
     <Card id="diagnostics-activity" title="Recent activity timeline">
-      {isLoading ? <LoadingState rows={4} label="Loading recent activity" /> :
+      {!loaded ? <ManualLoad label="Load timeline" onLoad={onLoad} /> :
+      isLoading ? <LoadingState rows={4} label="Loading recent activity" /> :
       isError ? <ErrorState title="Couldn't load recent activity" description="The timeline endpoint is unreachable." /> :
       items.length === 0 ? <EmptyState title="No recent activity" description="No lifecycle timeline activity has been recorded." /> :
       <ol className="flex flex-col divide-y divide-border rounded-md border border-border">
@@ -252,12 +269,73 @@ function RecentActivity({
           );
         })}
       </ol>}
+      {loaded ? <ManualLoad label="Refresh timeline" onLoad={onRefresh} /> : null}
+    </Card>
+  );
+}
+
+function ManualLoad({ label, onLoad }: { label: string; onLoad: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onLoad}
+      className="w-fit rounded-md bg-surface-raised px-3 py-2 text-body font-semibold text-text shadow-elev-1 hover:bg-accent-quiet focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+    >
+      {label}
+    </button>
+  );
+}
+
+function HeavyCountCard({
+  id,
+  title,
+  label,
+  loaded,
+  isLoading,
+  isError,
+  count,
+  onLoad,
+  onRefresh,
+}: {
+  id: string;
+  title: string;
+  label: string;
+  loaded: boolean;
+  isLoading: boolean;
+  isError: boolean;
+  count: number;
+  onLoad: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <Card id={id} title={title}>
+      {!loaded ? <ManualLoad label={`Load ${label}`} onLoad={onLoad} /> :
+      isLoading ? <LoadingState rows={2} label={`Loading ${label}`} /> :
+      isError ? <ErrorState title={`Couldn't load ${label}`} description="Use refresh to try again." /> :
+      <p className="text-body text-text-muted">{count} records reported.</p>}
+      {loaded ? <ManualLoad label={`Refresh ${label}`} onLoad={onRefresh} /> : null}
     </Card>
   );
 }
 
 export function DiagnosticsPage() {
-  const data = useDiagnosticsData();
+  const diagnosticsAutoLoad = useRefreshPreferencesStore((s) => s.diagnosticsAutoLoad);
+  const heavyManualOnly = useRefreshPreferencesStore((s) => s.heavyEndpointsManualOnly);
+  const autoLoad = diagnosticsAutoLoad && !heavyManualOnly;
+  const [load, setLoad] = useState({
+    collectors: autoLoad,
+    states: autoLoad,
+    timeline: autoLoad,
+    events: autoLoad,
+    traces: autoLoad,
+  });
+  const data = useDiagnosticsData(load);
+  const baseQueries = [data.validation, data.executions];
+  const enable = (key: keyof typeof load) => setLoad((current) => ({ ...current, [key]: true }));
+  const refreshCollectors = () => {
+    [data.qbit, data.radarr, data.seerr, data.storage, data.imports]
+      .forEach((query) => void query.refetch());
+  };
   const collectors = useMemo(() => {
     const built = buildIntegrations({
       qbit: data.qbit.data,
@@ -296,13 +374,21 @@ export function DiagnosticsPage() {
         <div className="flex flex-col gap-2">
           <h1 id="diagnostics-title" className="text-title text-text">Diagnostics</h1>
           <p className="max-w-[60ch] text-body text-text-muted">Read-only operational details from Handoffarr's existing validation, collector, execution, and timeline APIs.</p>
+          <PageRefreshControls
+            dataUpdatedAt={Math.max(...baseQueries.map((query) => query.dataUpdatedAt))}
+            isFetching={baseQueries.some((query) => query.isFetching)}
+            onRefresh={() => { baseQueries.forEach((query) => void query.refetch()); }}
+          />
         </div>
       </header>
       <Overview collectors={collectors} validation={validationStatus(data.validation.data?.status)} execution={executionStatus(latestExecution?.execution_status)} />
-      <CollectorStatus collectors={collectors} lastResults={lastResults} isLoading={data.qbit.isLoading || data.radarr.isLoading || data.seerr.isLoading || data.storage.isLoading || data.imports.isLoading || data.states.isLoading} />
+      <CollectorStatus collectors={collectors} lastResults={lastResults} loaded={load.collectors} onLoad={() => enable("collectors")} onRefresh={refreshCollectors} isLoading={data.qbit.isLoading || data.radarr.isLoading || data.seerr.isLoading || data.storage.isLoading || data.imports.isLoading} />
       <ValidationDetails {...data.validation} />
       <ExecutionHistory {...data.executions} />
-      <RecentActivity timeline={data.timeline} executions={data.executions} validation={data.validation} />
+      <RecentActivity timeline={data.timeline} executions={data.executions} validation={data.validation} loaded={load.timeline} onLoad={() => enable("timeline")} onRefresh={() => { void data.timeline.refetch(); }} />
+      <HeavyCountCard id="diagnostics-events" title="Events" label="events" loaded={load.events} onLoad={() => enable("events")} onRefresh={() => { void data.events.refetch(); }} isLoading={data.events.isLoading} isError={data.events.isError} count={data.events.data?.events.length ?? 0} />
+      <HeavyCountCard id="diagnostics-traces" title="Traces" label="traces" loaded={load.traces} onLoad={() => enable("traces")} onRefresh={() => { void data.traces.refetch(); }} isLoading={data.traces.isLoading} isError={data.traces.isError} count={data.traces.data?.traces.length ?? 0} />
+      <HeavyCountCard id="diagnostics-states" title="Debug states" label="debug states" loaded={load.states} onLoad={() => enable("states")} onRefresh={() => { void data.states.refetch(); }} isLoading={data.states.isLoading} isError={data.states.isError} count={data.states.data?.torrent_count ?? data.states.data?.total ?? 0} />
     </section>
   );
 }

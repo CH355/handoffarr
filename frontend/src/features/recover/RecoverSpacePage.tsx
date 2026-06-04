@@ -5,6 +5,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { formatBytes } from "@/lib/formatBytes";
 import { RecommendationCard } from "./components/RecommendationCard";
 import { useCleanupReviewQuery } from "./hooks/useCleanupReview";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 
 /* RecoverSpacePage — Mockups §2 three-section recommendation pattern.
    The stat tiles in the cards are non-clickable; navigation happens through
@@ -45,6 +46,11 @@ export function RecoverSpacePage() {
           Review what Handoffarr has classified before any deletion. Handoffarr never
           removes a file on its own — every action requires explicit confirmation.
         </p>
+        <PageRefreshControls
+          dataUpdatedAt={review.dataUpdatedAt}
+          isFetching={review.isFetching}
+          onRefresh={() => { void review.refetch(); }}
+        />
       </header>
 
       {review.isLoading ? (

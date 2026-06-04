@@ -3,38 +3,33 @@ import { getCleanupSummary } from "@/api/cleanupApi";
 import { getValidation } from "@/api/validationApi";
 import { getStorage } from "@/api/storageApi";
 import { listImports } from "@/api/importsApi";
-import { getStates } from "@/api/debugApi";
+import { useRefreshQueryOptions } from "@/hooks/useRefreshQueryOptions";
 
 /* Home server-state composition per frontend-implementation-spec-v1.md §7.2.
    Each query owns its own loading/error so the page can degrade per-card. */
 export function useHomeData() {
+  const light = useRefreshQueryOptions("light");
+  const medium = useRefreshQueryOptions("medium");
   const cleanup = useQuery({
     queryKey: ["cleanup"],
     queryFn: getCleanupSummary,
-    staleTime: 30_000,
+    ...medium,
   });
   const validation = useQuery({
     queryKey: ["validation"],
     queryFn: getValidation,
-    staleTime: 30_000,
+    ...light,
   });
   const storage = useQuery({
     queryKey: ["storage"],
     queryFn: getStorage,
-    staleTime: 60_000,
+    ...medium,
   });
   const imports = useQuery({
     queryKey: ["imports"],
     queryFn: listImports,
-    staleTime: 60_000,
-  });
-  // R-B1: tile-level rollup is a backend gap; probe used as best-effort context.
-  const states = useQuery({
-    queryKey: ["debug", "states"],
-    queryFn: getStates,
-    staleTime: 30_000,
-    retry: 0,
+    ...medium,
   });
 
-  return { cleanup, validation, storage, imports, states };
+  return { cleanup, validation, storage, imports };
 }

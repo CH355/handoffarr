@@ -6,13 +6,16 @@ import { RuntimeSettingsCard } from "./components/RuntimeSettingsCard";
 import { AboutCard } from "./components/AboutCard";
 import { ModeSettingsCard } from "./components/ModeSettingsCard";
 import { DiagnosticsSettingsCard } from "./components/DiagnosticsSettingsCard";
+import { RefreshBehaviorSettingsCard } from "./components/RefreshBehaviorSettingsCard";
 import { useModeStore } from "@/app/stores/useModeStore";
+import { PageRefreshControls } from "@/components/PageRefreshControls";
 
 /* Settings remains a configuration visibility surface. Sprint 7 adds only
    the client-side Mode control and Expert-gated Diagnostics entry. */
 export function SettingsPage() {
   const mode = useModeStore((s) => s.mode);
   const { health, qbit, radarr, seerr, storage, executions } = useSettingsData();
+  const queries = [health, qbit, radarr, seerr, storage, executions];
 
   return (
     <section
@@ -27,6 +30,11 @@ export function SettingsPage() {
           How Handoffarr is configured, which integrations are wired up, where
           data comes from, and what operational limits are in effect.
         </p>
+        <PageRefreshControls
+          dataUpdatedAt={Math.max(...queries.map((query) => query.dataUpdatedAt))}
+          isFetching={queries.some((query) => query.isFetching)}
+          onRefresh={() => { queries.forEach((query) => void query.refetch()); }}
+        />
       </header>
 
       <GeneralSettingsCard
@@ -74,6 +82,7 @@ export function SettingsPage() {
       />
 
       <ModeSettingsCard />
+      <RefreshBehaviorSettingsCard />
 
       {mode === "expert" ? <DiagnosticsSettingsCard /> : null}
 
