@@ -1,17 +1,7 @@
 import { request } from "./client";
 
-/* Settings API surface.
-
-   Settings is read-only: there is no backend endpoint that accepts
-   configuration writes. We compose the page out of existing read endpoints
-   already exposed by app/main.py:
-
-     - GET /api/health             — config presence
-     - GET /api/cleanup/executions — cleanup_execution.* gates (config sub-doc)
-     - GET /api/storage            — runtime thresholds (warning/critical/etc)
-     - GET /api/debug/{qbit,radarr,seerr} — integration probes (reused)
-
-   No write endpoints exist, so no mutation calls live here. */
+/* Typed Settings API. Protected values and arbitrary config keys are never
+   represented in this client contract. */
 
 export interface AppHealth {
   status: string;
@@ -20,4 +10,53 @@ export interface AppHealth {
 
 export function getAppHealth(): Promise<AppHealth> {
   return request<AppHealth>("/api/health");
+}
+
+export interface CleanupSettings {
+  enabled: boolean;
+  allow_single_item_execution: boolean;
+  allow_batch_execution: boolean;
+  require_confirmation_phrase: boolean;
+  require_batch_dry_run: boolean;
+  max_items_per_request: number;
+  max_batch_items: number;
+}
+
+export interface StorageSettings {
+  critical_free_bytes: number;
+  warning_free_bytes: number;
+  completed_torrent_count: number;
+  retained_bytes: number;
+}
+
+export interface SettingsResponse {
+  cleanup: CleanupSettings;
+  storage: StorageSettings;
+  restart_required: boolean;
+}
+
+export function getSettings(): Promise<SettingsResponse> {
+  return request<SettingsResponse>("/api/settings");
+}
+
+export function putCleanupSettings(payload: CleanupSettings): Promise<SettingsResponse> {
+  return request<SettingsResponse>("/api/settings/cleanup", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Handoffarr-Expert-Mode": "true",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function putStorageSettings(payload: StorageSettings): Promise<SettingsResponse> {
+  return request<SettingsResponse>("/api/settings/storage", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Handoffarr-Expert-Mode": "true",
+    },
+    body: JSON.stringify(payload),
+  });
 }

@@ -1,8 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { getAppHealth } from "@/api/settingsApi";
+import { getAppHealth, getSettings } from "@/api/settingsApi";
 import { getQbitProbe, getRadarrProbe, getSeerrProbe } from "@/api/healthApi";
-import { getStorage } from "@/api/storageApi";
-import { getCleanupExecutions } from "@/api/cleanupApi";
 
 /* Settings page server-state composition. Each query owns its own loading
    and error state so cards degrade independently (no full-page spinner). */
@@ -10,6 +8,12 @@ export function useSettingsData() {
   const health = useQuery({
     queryKey: ["settings", "health"],
     queryFn: getAppHealth,
+    staleTime: 30_000,
+    retry: 0,
+  });
+  const settings = useQuery({
+    queryKey: ["settings", "editable"],
+    queryFn: getSettings,
     staleTime: 30_000,
     retry: 0,
   });
@@ -31,15 +35,5 @@ export function useSettingsData() {
     staleTime: 30_000,
     retry: 0,
   });
-  const storage = useQuery({
-    queryKey: ["storage"],
-    queryFn: getStorage,
-    staleTime: 60_000,
-  });
-  const executions = useQuery({
-    queryKey: ["cleanup", "executions"],
-    queryFn: () => getCleanupExecutions(1),
-    staleTime: 60_000,
-  });
-  return { health, qbit, radarr, seerr, storage, executions };
+  return { health, settings, qbit, radarr, seerr };
 }

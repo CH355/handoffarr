@@ -13,7 +13,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -73,6 +73,14 @@ from .responsibility import (
     summarize_assessments,
 )
 from .validation import run_validation
+from .settings_config import (
+    CleanupExecutionSettings,
+    SettingsWriteError,
+    StorageThresholdSettings,
+    settings_response,
+    update_cleanup,
+    update_storage,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,6 +107,7 @@ FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 # Module-level state, set during startup.
 _config: Config | None = None
 _poll_lock = asyncio.Lock()
+_settings_lock = asyncio.Lock()
 
 
 def get_config() -> Config:
@@ -237,6 +246,51 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Handoffarr", lifespan=lifespan)
+
+
+def _replace_config(config: Config) -> None:
+    global _config
+    _config = config
+
+
+def _require_expert(expert_mode: str | None) -> None:
+    if expert_mode != "true":
+        raise HTTPException(status_code=403, detail="Expert Mode is required")
+
+
+@app.get("/api/settings")
+async def api_settings() -> JSONResponse:
+    return JSONResponse(settings_response(get_config()))
+
+
+@app.put("/api/settings/cleanup")
+async def api_settings_cleanup(
+    payload: CleanupExecutionSettings,
+    expert_mode: str | None = Header(default=None, alias="X-Handoffarr-Expert-Mode"),
+) -> JSONResponse:
+    _require_expert(expert_mode)
+    try:
+        async with _settings_lock:
+            updated = await asyncio.to_thread(update_cleanup, get_config(), payload)
+            _replace_config(updated)
+        return JSONResponse(settings_response(updated))
+    except SettingsWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.put("/api/settings/storage")
+async def api_settings_storage(
+    payload: StorageThresholdSettings,
+    expert_mode: str | None = Header(default=None, alias="X-Handoffarr-Expert-Mode"),
+) -> JSONResponse:
+    _require_expert(expert_mode)
+    try:
+        async with _settings_lock:
+            updated = await asyncio.to_thread(update_storage, get_config(), payload)
+            _replace_config(updated)
+        return JSONResponse(settings_response(updated))
+    except SettingsWriteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/health")

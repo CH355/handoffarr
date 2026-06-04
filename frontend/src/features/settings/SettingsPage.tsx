@@ -12,7 +12,8 @@ import { useModeStore } from "@/app/stores/useModeStore";
    the client-side Mode control and Expert-gated Diagnostics entry. */
 export function SettingsPage() {
   const mode = useModeStore((s) => s.mode);
-  const { health, qbit, radarr, seerr, storage, executions } = useSettingsData();
+  const { health, settings, qbit, radarr, seerr } = useSettingsData();
+  const editable = mode === "expert";
 
   return (
     <section
@@ -62,15 +63,17 @@ export function SettingsPage() {
       />
 
       <CleanupSettingsCard
-        config={executions.data?.config}
-        isLoading={executions.isLoading}
-        isError={executions.isError}
+        data={settings.data?.cleanup}
+        isLoading={settings.isLoading}
+        isError={settings.isError}
+        editable={editable}
       />
 
       <RuntimeSettingsCard
-        storage={storage.data}
-        isLoading={storage.isLoading}
-        isError={storage.isError}
+        data={settings.data?.storage}
+        isLoading={settings.isLoading}
+        isError={settings.isError}
+        editable={editable}
       />
 
       <ModeSettingsCard />
