@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { LoadingState } from "@/components/LoadingState";
 import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
+import { BackgroundRefreshStatus } from "@/components/BackgroundRefreshStatus";
 import { formatBytes } from "@/lib/formatBytes";
 import { formatRelativeTime } from "@/lib/formatRelativeTime";
 import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
@@ -10,7 +11,7 @@ import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
    Lists batches and standalone executions. Undo/Restore is R-B4 (backend gap)
    and is not surfaced as an action here. */
 export function CleanupHistoryPage() {
-  const executions = useCleanupExecutionsQuery(100);
+  const executions = useCleanupExecutionsQuery();
   const batches = executions.data?.batches ?? [];
   const singles = (executions.data?.executions ?? []).filter((e) => !e.batch_id);
 
@@ -32,6 +33,7 @@ export function CleanupHistoryPage() {
         <p className="text-body text-text-muted">
           Every dry-run and execution Handoffarr has recorded.
         </p>
+        <BackgroundRefreshStatus isFetching={executions.isFetching && !executions.isLoading} />
       </header>
 
       {executions.isLoading ? (
@@ -55,19 +57,24 @@ export function CleanupHistoryPage() {
                 {batches.map((b) => (
                   <li
                     key={b.batch_id}
-                    className="rounded-lg bg-surface p-4 shadow-elev-1"
+                    className={`rounded-lg bg-surface p-4 shadow-elev-1 ${
+                      isDeemphasized(b.status) ? "opacity-75" : ""
+                    }`}
                   >
                     <Link
                       to={`/recover/history/${encodeURIComponent(b.batch_id)}`}
                       className="flex flex-wrap items-baseline justify-between gap-2 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                     >
                       <p className="text-body text-text">
-                        Batch {b.batch_id.slice(0, 16)}…
+                        Cleanup Batch
                       </p>
                       <p className="text-meta text-text-muted">
                         {formatRelativeTime(b.completed_at ?? b.created_at)}
                       </p>
                     </Link>
+                    <p className="mt-1 break-all font-mono text-meta text-text-subtle">
+                      {b.batch_id}
+                    </p>
                     <dl className="mt-1 flex flex-wrap gap-x-4 text-meta text-text-muted">
                       <div className="flex gap-1">
                         <dt>Status</dt>
@@ -81,11 +88,16 @@ export function CleanupHistoryPage() {
                       </div>
                       <div className="flex gap-1">
                         <dt>Recovered</dt>
-                        <dd className="text-text [font-variant-numeric:tabular-nums]">
+                        <dd className={`${isCompleted(b.status) ? "font-semibold text-success" : "text-text"} [font-variant-numeric:tabular-nums]`}>
                           {formatBytes(b.actual_recovered_bytes ?? 0)}
                         </dd>
                       </div>
                     </dl>
+                    {batchBlockingReasons(b).length ? (
+                      <ul className="mt-2 list-disc pl-5 text-meta text-text-muted">
+                        {batchBlockingReasons(b).map((reason) => <li key={reason}>{reason}</li>)}
+                      </ul>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -99,7 +111,9 @@ export function CleanupHistoryPage() {
                 {singles.map((e) => (
                   <li
                     key={e.execution_id}
-                    className="rounded-lg bg-surface p-4 shadow-elev-1"
+                    className={`rounded-lg bg-surface p-4 shadow-elev-1 ${
+                      isDeemphasized(e.execution_status) ? "opacity-75" : ""
+                    }`}
                   >
                     <div className="flex flex-wrap items-baseline justify-between gap-2">
                       <p className="text-body text-text">
@@ -113,6 +127,11 @@ export function CleanupHistoryPage() {
                       {e.execution_status ?? "—"} ·{" "}
                       {formatBytes(e.recoverable_bytes ?? 0)}
                     </p>
+                    {e.blocking_reasons?.length ? (
+                      <ul className="mt-2 list-disc pl-5 text-meta text-text-muted">
+                        {e.blocking_reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                      </ul>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -122,4 +141,20 @@ export function CleanupHistoryPage() {
       )}
     </section>
   );
+}
+
+function isCompleted(status: string | null | undefined) {
+  return status?.toLowerCase() === "completed";
+}
+
+function isDeemphasized(status: string | null | undefined) {
+  const normalized = status?.toLowerCase() ?? "";
+  return normalized.includes("dry run") || normalized.includes("blocked");
+}
+
+function batchBlockingReasons(batch: { evidence?: Record<string, unknown> }) {
+  const reasons = batch.evidence?.execute_blocking_reasons;
+  return Array.isArray(reasons)
+    ? reasons.filter((reason): reason is string => typeof reason === "string")
+    : [];
 }

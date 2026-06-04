@@ -32,7 +32,7 @@ export function useHomeData() {
   const states = useQuery({
     queryKey: ["debug", "states"],
     queryFn: getStates,
-    staleTime: 0,
+    staleTime: 30_000,
     retry: 0,
   });
 

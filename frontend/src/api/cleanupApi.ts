@@ -354,12 +354,14 @@ export interface CleanupBatchExecutePayload {
 
 export interface CleanupBatchExecuteResult {
   batch_id?: string;
+  batch_status?: string;
   status?: string;
   item_count?: number;
   completed_count?: number;
   failed_count?: number;
   planned_recoverable_bytes?: number;
   actual_recovered_bytes?: number;
+  total_recovered_bytes?: number;
   per_item?: Array<Record<string, unknown>>;
   blocking_reasons?: string[];
   [key: string]: unknown;
