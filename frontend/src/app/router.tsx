@@ -12,6 +12,7 @@ import { ItemDetailSurface } from "@/features/itemDetail/ItemDetailSurface";
 import { HealthPage } from "@/features/health/HealthPage";
 import { IntegrationDetailPage } from "@/features/health/IntegrationDetailPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
+import { DiagnosticsRoute } from "@/features/diagnostics/DiagnosticsRoute";
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
    Sprint 3 adds the Recover Space sub-routes (§4.2). */
@@ -38,6 +39,7 @@ export const router = createBrowserRouter([
         element: <IntegrationDetailPage />,
       },
       { path: "settings", element: <SettingsPage /> },
+      { path: "settings/diagnostics", element: <DiagnosticsRoute /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

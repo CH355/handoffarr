@@ -6,6 +6,8 @@ export interface ValidationCheck {
   name?: string;
   status: ValidationStatus;
   message?: string;
+  reason?: string;
+  evidence?: Record<string, unknown>;
 }
 
 export interface ValidationResponse {

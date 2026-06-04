@@ -31,6 +31,20 @@ export interface MediaTimelineResponse {
   outcome: string | null;
 }
 
+export interface TimelineResponse {
+  summary: {
+    total_timelines?: number;
+    completed?: number;
+    blocked?: number;
+    failed_by_stage?: Record<string, number>;
+  };
+  recent_timelines: MediaTimeline[];
+}
+
+export function getTimeline(): Promise<TimelineResponse> {
+  return request<TimelineResponse>("/api/timeline");
+}
+
 export function getMediaTimeline(mediaId: string): Promise<MediaTimelineResponse> {
   return request<MediaTimelineResponse>(
     `/api/timeline/${encodeURIComponent(mediaId)}`,

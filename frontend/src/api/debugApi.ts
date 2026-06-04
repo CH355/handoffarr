@@ -4,9 +4,14 @@ import { request } from "./client";
    the Stat Tile activity context (R-B1: tile-level rollup remains a backend
    gap; the page degrades gracefully if the probe is unreachable). */
 export interface DebugStatesResponse {
+  service?: string;
+  enabled?: boolean;
   ok?: boolean;
   error?: string;
   states?: Record<string, number>;
+  counts_per_state?: Record<string, number>;
+  classification_counts?: Record<string, number>;
+  torrent_count?: number;
   total?: number;
 }
 
