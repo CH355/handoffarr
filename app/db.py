@@ -366,7 +366,14 @@ _DEDUP_RAW_EVENT_TYPES: frozenset[tuple[str, str]] = frozenset(
         ("qbittorrent", "torrent"),
         ("cleanup", "observation"),
         ("cleanup", "file_evidence"),
+        ("decision", "observation"),
         ("library", "artifact"),
+        ("lidarr", "import_success"),
+        ("radarr", "downloadfolderimported"),
+        ("radarr", "grabbed"),
+        ("radarr", "import_success"),
+        ("seerr", "request"),
+        ("sonarr", "import_success"),
     }
 )
 
@@ -376,7 +383,12 @@ _RAW_EVENT_DEDUP_COLUMNS: tuple[tuple[str, str], ...] = (
 
 _VOLATILE_FINGERPRINT_KEYS: frozenset[str] = frozenset(
     {
+        "age",
+        "last_seen",
         "observed_at",
+        "relative_time",
+        "timestamp",
+        "updated_at",
     }
 )
 
