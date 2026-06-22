@@ -203,6 +203,8 @@ def validate_completed_execution_reconciliation(
     artifacts: list[dict[str, Any]],
     traces: list[dict[str, Any]],
     executions: list[dict[str, Any]],
+    review_items: list[dict[str, Any]] | None = None,
+    projection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     completed_index = latest_completed_execution_index(executions)
     completed_hashes = set((completed_index.get("by_hash") or {}).keys())
@@ -213,13 +215,50 @@ def validate_completed_execution_reconciliation(
             "No completed cleanup executions require reconciliation.",
         )
 
-    review_items = build_cleanup_review(
-        cleanup_events,
-        import_events,
-        artifacts,
-        traces,
-        config,
-    )
+    if review_items is None:
+        if projection:
+            cleanup_projection = projection.get("cleanup_review") or {}
+            cleanup_summary = cleanup_projection.get("summary") or {}
+            reconciliation = (
+                cleanup_summary.get("completed_execution_reconciliation") or {}
+            )
+            offender_count = int(reconciliation.get("offender_count") or 0)
+            if offender_count:
+                return _check(
+                    "Cleanup Execution Reconciliation",
+                    FAIL,
+                    "Completed cleanup execution still appears as a Safe or Risky cleanup review candidate.",
+                    {
+                        "offenders": reconciliation.get("offenders") or [],
+                        "count": offender_count,
+                        "projection": cleanup_projection.get("projection") or {},
+                    },
+                )
+            if cleanup_projection.get("projection", {}).get("generated_at"):
+                return _check(
+                    "Cleanup Execution Reconciliation",
+                    OK,
+                    "Completed cleanup executions are excluded from Safe and Risky review candidates.",
+                    {
+                        "completed_execution_hashes": reconciliation.get(
+                            "completed_execution_hashes", 0
+                        ),
+                        "projection": cleanup_projection.get("projection") or {},
+                    },
+                )
+            return _check(
+                "Cleanup Execution Reconciliation",
+                WARN,
+                "Cleanup review projection is unavailable; reconciliation skipped without synchronous rebuild.",
+                cleanup_projection.get("projection") or projection,
+            )
+        review_items = build_cleanup_review(
+            cleanup_events,
+            import_events,
+            artifacts,
+            traces,
+            config,
+        )
     offenders: list[dict[str, Any]] = []
     for item in review_items:
         if item.get("review_class") not in {SAFE_REVIEW, RISKY_REVIEW}:
@@ -325,10 +364,17 @@ def validate_batch_execution_safety(
     )
 
 
-def run_validation(config: Config) -> dict[str, Any]:
+def run_validation(
+    config: Config,
+    *,
+    artifacts: list[dict[str, Any]] | None = None,
+    review_items: list[dict[str, Any]] | None = None,
+    projection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Run every validation check against the current persisted state."""
     import_events = db.all_import_events()
-    artifacts = enrich_library_artifacts(db.all_library_artifacts(), config)
+    if artifacts is None:
+        artifacts = enrich_library_artifacts(db.all_library_artifacts(), config)
     cleanup_events = db.all_cleanup_events()
     recommendations = db.all_recommendations()
     executions = db.all_cleanup_executions(limit=5000)
@@ -352,6 +398,8 @@ def run_validation(config: Config) -> dict[str, Any]:
             artifacts,
             db.all_traces(),
             executions,
+            review_items=review_items,
+            projection=projection,
         ),
         validate_batch_execution_safety(config, batches),
     ]
@@ -360,4 +408,4 @@ def run_validation(config: Config) -> dict[str, Any]:
         overall = FAIL
     elif any(c["status"] == WARN for c in checks):
         overall = WARN
-    return {"status": overall, "checks": checks}
+    return {"status": overall, "checks": checks, "projection": projection or {}}

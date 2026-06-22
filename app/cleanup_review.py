@@ -772,6 +772,7 @@ def cleanup_review_response(
     limit: int | None = None,
     offset: int = 0,
     sort: str | None = None,
+    projection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     active = [_with_qbit_hash(item) for item in items if not item.get("excluded_by_dedupe")]
     filtered = _apply_filters(
@@ -806,6 +807,7 @@ def cleanup_review_response(
         },
         "top_candidates": page[:10],
         "candidates": page,
+        "projection": projection or {},
     }
 
 

@@ -6,7 +6,7 @@ interface SuccessStateBannerProps {
   variant?: "success" | "partial-fail";
   title: string;
   description?: string;
-  meta?: string;
+  meta?: string | undefined;
   actions?: ReactNode;
 }
 

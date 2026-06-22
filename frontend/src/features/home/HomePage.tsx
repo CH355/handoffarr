@@ -7,9 +7,9 @@ import { ErrorState } from "@/components/ErrorState";
 import { formatBytes } from "@/lib/formatBytes";
 import { formatRelativeTime } from "@/lib/formatRelativeTime";
 import { useHomeData } from "./hooks/useHomeData";
-import { PageRefreshControls } from "@/components/PageRefreshControls";
 import type { CleanupResponse, CleanupCandidate } from "@/api/cleanupApi";
 import type { ValidationResponse } from "@/api/validationApi";
+import { AuditProfiler, measureSync, useRouteAudit } from "@/perf/audit";
 
 type BannerVariant = "critical" | "recover" | "stuck" | "idle";
 
@@ -79,10 +79,23 @@ function lastCleanupTimestamp(cleanup: CleanupResponse | undefined): string | nu
 
 export function HomePage() {
   const { cleanup, validation, storage, imports } = useHomeData();
-  const queries = [cleanup, validation, storage, imports];
+  const dataReady =
+    !cleanup.isLoading &&
+    !validation.isLoading &&
+    !storage.isLoading &&
+    !imports.isLoading;
+  useRouteAudit("Home", dataReady, {
+    cleanup_status: cleanup.status,
+    validation_status: validation.status,
+    storage_status: storage.status,
+    imports_status: imports.status,
+  });
 
   const banner = useMemo(
-    () => deriveBanner(cleanup.data, validation.data),
+    () =>
+      measureSync("transform", "Home.deriveBanner", () =>
+        deriveBanner(cleanup.data, validation.data),
+      ),
     [cleanup.data, validation.data],
   );
 
@@ -98,11 +111,6 @@ export function HomePage() {
       <h1 id="home-title" className="sr-only">
         Home
       </h1>
-      <PageRefreshControls
-        dataUpdatedAt={Math.max(...queries.map((query) => query.dataUpdatedAt))}
-        isFetching={queries.some((query) => query.isFetching)}
-        onRefresh={() => { queries.forEach((query) => void query.refetch()); }}
-      />
 
       {bannerLoading ? (
         <div
@@ -117,34 +125,40 @@ export function HomePage() {
           description="The backend is unreachable. Reload once it's back."
         />
       ) : (
-        <PrimaryBanner {...banner} />
+        <AuditProfiler id="Home.PrimaryBanner">
+          <PrimaryBanner {...banner} />
+        </AuditProfiler>
       )}
 
-      <StatTileRow
-        storage={{
-          data: storage.data,
-          isLoading: storage.isLoading,
-          isError: storage.isError,
-        }}
-        imports={{
-          data: imports.data,
-          isLoading: imports.isLoading,
-          isError: imports.isError,
-        }}
-        validation={{
-          data: validation.data,
-          isLoading: validation.isLoading,
-          isError: validation.isError,
-        }}
-      />
+      <AuditProfiler id="Home.StatTileRow">
+        <StatTileRow
+          storage={{
+            data: storage.data,
+            isLoading: storage.isLoading,
+            isError: storage.isError,
+          }}
+          imports={{
+            data: imports.data,
+            isLoading: imports.isLoading,
+            isError: imports.isError,
+          }}
+          validation={{
+            data: validation.data,
+            isLoading: validation.isLoading,
+            isError: validation.isError,
+          }}
+        />
+      </AuditProfiler>
 
-      <RecentlyAddedSection
-        state={{
-          data: imports.data,
-          isLoading: imports.isLoading,
-          isError: imports.isError,
-        }}
-      />
+      <AuditProfiler id="Home.RecentlyAddedSection">
+        <RecentlyAddedSection
+          state={{
+            data: imports.data,
+            isLoading: imports.isLoading,
+            isError: imports.isError,
+          }}
+        />
+      </AuditProfiler>
     </section>
   );
 }

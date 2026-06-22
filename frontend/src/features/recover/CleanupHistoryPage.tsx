@@ -97,11 +97,6 @@ export function CleanupHistoryPage() {
                         </dd>
                       </div>
                     </dl>
-                    {batchBlockingReasons(b).length ? (
-                      <ul className="mt-2 list-disc pl-5 text-meta text-text-muted">
-                        {batchBlockingReasons(b).map((reason) => <li key={reason}>{reason}</li>)}
-                      </ul>
-                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -154,11 +149,4 @@ function isCompleted(status: string | null | undefined) {
 function isDeemphasized(status: string | null | undefined) {
   const normalized = status?.toLowerCase() ?? "";
   return normalized.includes("dry run") || normalized.includes("blocked");
-}
-
-function batchBlockingReasons(batch: { evidence?: Record<string, unknown> }) {
-  const reasons = batch.evidence?.execute_blocking_reasons;
-  return Array.isArray(reasons)
-    ? reasons.filter((reason): reason is string => typeof reason === "string")
-    : [];
 }

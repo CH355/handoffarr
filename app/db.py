@@ -6,19 +6,23 @@ Stores raw collector events and correlated handoff traces. The database lives at
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import sqlite3
 import threading
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger("handoffarr.db")
+dedup_audit_logger = logging.getLogger("handoffarr.audit.raw_event_dedup")
 
 DB_PATH = os.environ.get("HANDOFFARR_DB", "/data/handoffarr.sqlite3")
 
 _lock = threading.Lock()
+_audit_lock = threading.Lock()
 
 
 def _utcnow() -> str:
@@ -46,6 +50,7 @@ def init_db() -> None:
                 torrent_hash TEXT,
                 download_id TEXT,
                 payload_json TEXT,
+                payload_fingerprint TEXT,
                 observed_at TEXT
             );
 
@@ -203,12 +208,24 @@ def init_db() -> None:
                 evidence_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS projection_snapshots (
+                projection_key TEXT PRIMARY KEY,
+                fingerprint TEXT,
+                payload_json TEXT,
+                summary_json TEXT,
+                source_event_count INTEGER,
+                generated_at TEXT,
+                updated_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
                 ON raw_events (source, event_type, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_hash
                 ON raw_events (torrent_hash);
+            CREATE INDEX IF NOT EXISTS idx_raw_events_identity_external
+                ON raw_events (source, event_type, external_id, id);
             CREATE INDEX IF NOT EXISTS idx_responsibility_assessments_domain
                 ON responsibility_assessments (responsible_domain, observed_at);
             CREATE INDEX IF NOT EXISTS idx_import_events_media
@@ -245,6 +262,8 @@ def init_db() -> None:
         )
         _migrate_handoff_traces(conn)
         _migrate_cleanup_executions(conn)
+        _migrate_projection_snapshots(conn)
+        _migrate_raw_events_dedup(conn)
     logger.info("Database initialized at %s", DB_PATH)
 
 
@@ -304,6 +323,487 @@ def _migrate_cleanup_executions(conn: sqlite3.Connection) -> None:
     )
 
 
+_PROJECTION_SNAPSHOT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("fingerprint", "TEXT"),
+    ("payload_json", "TEXT"),
+    ("summary_json", "TEXT"),
+    ("source_event_count", "INTEGER"),
+    ("generated_at", "TEXT"),
+    ("updated_at", "TEXT"),
+)
+
+
+def _migrate_projection_snapshots(conn: sqlite3.Connection) -> None:
+    existing = {
+        row["name"] for row in conn.execute("PRAGMA table_info(projection_snapshots)")
+    }
+    for name, col_type in _PROJECTION_SNAPSHOT_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE projection_snapshots ADD COLUMN {name} {col_type}")
+            logger.info("Migrated projection_snapshots: added column %s", name)
+
+    refreshed = {
+        row["name"] for row in conn.execute("PRAGMA table_info(projection_snapshots)")
+    }
+    if "generated_at" in refreshed:
+        if "created_at" in refreshed and "updated_at" in refreshed:
+            conn.execute(
+                """
+                UPDATE projection_snapshots
+                SET generated_at = COALESCE(generated_at, created_at, updated_at)
+                WHERE generated_at IS NULL
+                """
+            )
+        elif "updated_at" in refreshed:
+            conn.execute(
+                """
+                UPDATE projection_snapshots
+                SET generated_at = COALESCE(generated_at, updated_at)
+                WHERE generated_at IS NULL
+                """
+            )
+
+
+_DEDUP_RAW_EVENT_TYPES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("qbittorrent", "torrent"),
+        ("cleanup", "observation"),
+        ("cleanup", "file_evidence"),
+        ("decision", "observation"),
+        ("library", "artifact"),
+        ("lidarr", "import_success"),
+        ("radarr", "downloadfolderimported"),
+        ("radarr", "grabbed"),
+        ("radarr", "import_success"),
+        ("seerr", "request"),
+        ("sonarr", "import_success"),
+    }
+)
+
+_RAW_EVENT_DEDUP_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("payload_fingerprint", "TEXT"),
+)
+
+_VOLATILE_FINGERPRINT_KEYS: frozenset[str] = frozenset(
+    {
+        "age",
+        "last_seen",
+        "observed_at",
+        "relative_time",
+        "timestamp",
+        "updated_at",
+         "age",
+        "availability",
+        "import_timestamp",
+        "last_seen",
+        "num_leechs",
+        "num_seeds",
+        "observed_at",
+        "ratio",
+        "relative_time",
+        "seeding_time",
+        "timestamp",
+        "updated_at",
+   }
+)
+
+_DEDUP_AUDIT_SAMPLE_LIMIT = 10
+_DEDUP_AUDIT_VALUE_LIMIT = 240
+_DEDUP_AUDIT_LIST_PREVIEW = 3
+_DEDUP_AUDIT_DEEP_DIFF_LIMIT = 40
+_DEDUP_AUDIT: dict[str, dict[str, Any]] = {}
+
+
+def _migrate_raw_events_dedup(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(raw_events)")}
+    for name, col_type in _RAW_EVENT_DEDUP_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE raw_events ADD COLUMN {name} {col_type}")
+            logger.info("Migrated raw_events: added column %s", name)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_raw_events_identity_external
+            ON raw_events (source, event_type, external_id, id)
+        """
+    )
+
+
+def _fingerprint_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(k): _fingerprint_payload(v)
+            for k, v in value.items()
+            if str(k) not in _VOLATILE_FINGERPRINT_KEYS
+        }
+    if isinstance(value, list):
+        return [_fingerprint_payload(item) for item in value]
+    return value
+
+
+def _dedup_audit_key(source: str, event_type: str) -> str:
+    return f"{source}/{event_type}"
+
+
+def _dedup_audit_bucket(source: str, event_type: str) -> dict[str, Any]:
+    key = _dedup_audit_key(source, event_type)
+    bucket = _DEDUP_AUDIT.get(key)
+    if bucket is None:
+        bucket = {
+            "source": source,
+            "event_type": event_type,
+            "attempted": 0,
+            "inserted": 0,
+            "suppressed_as_duplicate": 0,
+            "inserted_with_prior_row": 0,
+            "inserted_without_prior_row": 0,
+            "logged_diff_samples": 0,
+            "diff_samples": [],
+        }
+        _DEDUP_AUDIT[key] = bucket
+    return bucket
+
+
+def _summarize_audit_value(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) > _DEDUP_AUDIT_VALUE_LIMIT:
+            return {
+                "type": "str",
+                "length": len(value),
+                "preview": value[:_DEDUP_AUDIT_VALUE_LIMIT],
+                "truncated": True,
+            }
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        keys = sorted(str(k) for k in value.keys())
+        preview: dict[str, Any] = {}
+        for key in keys[:_DEDUP_AUDIT_LIST_PREVIEW]:
+            preview[key] = _summarize_audit_value(value.get(key))
+        return {
+            "type": "dict",
+            "keys": keys[:20],
+            "key_count": len(keys),
+            "preview": preview,
+        }
+    if isinstance(value, list):
+        return {
+            "type": "list",
+            "length": len(value),
+            "preview": [
+                _summarize_audit_value(item)
+                for item in value[:_DEDUP_AUDIT_LIST_PREVIEW]
+            ],
+        }
+    return repr(value)[:_DEDUP_AUDIT_VALUE_LIMIT]
+
+
+def _summarize_changed_branch(old: Any, new: Any) -> dict[str, Any]:
+    if isinstance(old, dict) and isinstance(new, dict):
+        old_keys = set(old.keys())
+        new_keys = set(new.keys())
+        changed = sorted(k for k in old_keys & new_keys if old.get(k) != new.get(k))
+        return {
+            "old": _summarize_audit_value(old),
+            "new": _summarize_audit_value(new),
+            "added_keys": sorted(new_keys - old_keys)[:20],
+            "removed_keys": sorted(old_keys - new_keys)[:20],
+            "changed_keys": changed[:20],
+            "changed_key_count": len(changed),
+        }
+    if isinstance(old, list) and isinstance(new, list):
+        changed_indexes: list[int] = []
+        for idx, (old_item, new_item) in enumerate(zip(old, new)):
+            if old_item != new_item:
+                changed_indexes.append(idx)
+            if len(changed_indexes) >= 20:
+                break
+        return {
+            "old": _summarize_audit_value(old),
+            "new": _summarize_audit_value(new),
+            "old_length": len(old),
+            "new_length": len(new),
+            "changed_indexes": changed_indexes,
+            "length_changed": len(old) != len(new),
+        }
+    return {
+        "old": _summarize_audit_value(old),
+        "new": _summarize_audit_value(new),
+    }
+
+
+def _payload_diff_summary(old: Any, new: Any) -> tuple[list[str], dict[str, Any]]:
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return ["$"], {"$": _summarize_changed_branch(old, new)}
+    old_keys = set(old.keys())
+    new_keys = set(new.keys())
+    changed_keys = sorted(
+        (old_keys ^ new_keys) | {k for k in old_keys & new_keys if old.get(k) != new.get(k)}
+    )
+    changes = {
+        key: _summarize_changed_branch(old.get(key), new.get(key))
+        for key in changed_keys[:30]
+    }
+    return changed_keys, changes
+def _append_deep_diff(
+    *,
+    path: str,
+    old: Any,
+    new: Any,
+    output: list[dict[str, Any]],
+    limit: int,
+) -> None:
+    if len(output) >= limit:
+        return
+
+    if type(old) is not type(new):
+        output.append(
+            {
+                "path": path,
+                "old": _summarize_audit_value(old),
+                "new": _summarize_audit_value(new),
+                "reason": "type_changed",
+            }
+        )
+        return
+
+    if isinstance(old, dict):
+        old_keys = set(old.keys())
+        new_keys = set(new.keys())
+
+        for key in sorted(old_keys - new_keys):
+            if len(output) >= limit:
+                return
+            output.append(
+                {
+                    "path": f"{path}.{key}" if path != "$" else f"$.{key}",
+                    "old": _summarize_audit_value(old.get(key)),
+                    "new": None,
+                    "reason": "removed",
+                }
+            )
+
+        for key in sorted(new_keys - old_keys):
+            if len(output) >= limit:
+                return
+            output.append(
+                {
+                    "path": f"{path}.{key}" if path != "$" else f"$.{key}",
+                    "old": None,
+                    "new": _summarize_audit_value(new.get(key)),
+                    "reason": "added",
+                }
+            )
+
+        for key in sorted(old_keys & new_keys):
+            if len(output) >= limit:
+                return
+            old_value = old.get(key)
+            new_value = new.get(key)
+            if old_value != new_value:
+                child_path = f"{path}.{key}" if path != "$" else f"$.{key}"
+                _append_deep_diff(
+                    path=child_path,
+                    old=old_value,
+                    new=new_value,
+                    output=output,
+                    limit=limit,
+                )
+        return
+
+    if isinstance(old, list):
+        min_len = min(len(old), len(new))
+        for idx in range(min_len):
+            if len(output) >= limit:
+                return
+            if old[idx] != new[idx]:
+                _append_deep_diff(
+                    path=f"{path}[{idx}]",
+                    old=old[idx],
+                    new=new[idx],
+                    output=output,
+                    limit=limit,
+                )
+
+        if len(old) != len(new) and len(output) < limit:
+            output.append(
+                {
+                    "path": path,
+                    "old_length": len(old),
+                    "new_length": len(new),
+                    "old": _summarize_audit_value(old),
+                    "new": _summarize_audit_value(new),
+                    "reason": "list_length_changed",
+                }
+            )
+        return
+
+    output.append(
+        {
+            "path": path,
+            "old": _summarize_audit_value(old),
+            "new": _summarize_audit_value(new),
+            "reason": "value_changed",
+        }
+    )
+
+
+def _payload_deep_diff(old: Any, new: Any) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    _append_deep_diff(
+        path="$",
+        old=old,
+        new=new,
+        output=output,
+        limit=_DEDUP_AUDIT_DEEP_DIFF_LIMIT,
+    )
+    return output
+
+def _dedup_audit_attempt(source: str, event_type: str) -> None:
+    with _audit_lock:
+        _dedup_audit_bucket(source, event_type)["attempted"] += 1
+
+
+def _dedup_audit_suppressed(source: str, event_type: str) -> None:
+    with _audit_lock:
+        bucket = _dedup_audit_bucket(source, event_type)
+        bucket["suppressed_as_duplicate"] += 1
+
+
+def _dedup_audit_inserted(
+    *,
+    source: str,
+    event_type: str,
+    identity: tuple[str, str],
+    previous_row: sqlite3.Row | None,
+    previous_normalized_payload: Any,
+    new_normalized_payload: Any,
+    new_observed_at: str,
+    previous_had_fingerprint: bool,
+    fingerprint_changed: bool,
+) -> None:
+    sample: dict[str, Any] | None = None
+    with _audit_lock:
+        bucket = _dedup_audit_bucket(source, event_type)
+        bucket["inserted"] += 1
+        if previous_row is None:
+            bucket["inserted_without_prior_row"] += 1
+            return
+        bucket["inserted_with_prior_row"] += 1
+        if bucket["logged_diff_samples"] >= _DEDUP_AUDIT_SAMPLE_LIMIT:
+            return
+        changed_keys, changes = _payload_diff_summary(
+            previous_normalized_payload,
+            new_normalized_payload,
+        )
+        sample = {
+            "source": source,
+            "event_type": event_type,
+            "identity": {"kind": identity[0], "value": identity[1]},
+            "previous_row_id": previous_row["id"],
+            "new_event_candidate_timestamp": new_observed_at,
+            "previous_had_payload_fingerprint": previous_had_fingerprint,
+            "fingerprint_changed": fingerprint_changed,
+            "changed_keys": changed_keys[:30],
+            "changed_key_count": len(changed_keys),
+            "changes": changes,
+        }
+        bucket["diff_samples"].append(sample)
+        bucket["logged_diff_samples"] += 1
+    if sample is not None:
+        dedup_audit_logger.info(json.dumps(sample, sort_keys=True, default=str))
+
+
+def raw_event_dedup_audit_snapshot() -> dict[str, Any]:
+    with _audit_lock:
+        return {
+            "sample_limit_per_event_type": _DEDUP_AUDIT_SAMPLE_LIMIT,
+            "event_types": deepcopy(_DEDUP_AUDIT),
+        }
+
+
+def _raw_event_identity(
+    source: str,
+    event_type: str,
+    external_id: str | None,
+    torrent_hash: str | None,
+    download_id: str | None,
+) -> tuple[str, str] | None:
+    if source == "cleanup" and event_type == "file_evidence" and torrent_hash:
+        return ("torrent_hash", torrent_hash.lower())
+    if external_id:
+        return ("external_id", str(external_id))
+    if torrent_hash:
+        return ("torrent_hash", torrent_hash.lower())
+    return None
+
+
+def _raw_event_fingerprint(
+    *,
+    source: str,
+    event_type: str,
+    identity: tuple[str, str],
+    payload: Any,
+) -> str:
+    body = {
+        "source": source,
+        "event_type": event_type,
+        "identity": identity,
+        "payload": _fingerprint_payload(payload),
+    }
+    encoded = json.dumps(body, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_from_payload_json(
+    *,
+    source: str,
+    event_type: str,
+    identity: tuple[str, str],
+    payload_json: str | None,
+) -> str | None:
+    payload = _normalized_payload_from_json(payload_json)
+    if payload is None:
+        return None
+    return _raw_event_fingerprint(
+        source=source,
+        event_type=event_type,
+        identity=identity,
+        payload=payload,
+    )
+
+
+def _normalized_payload_from_json(payload_json: str | None) -> Any:
+    if not payload_json:
+        return None
+    try:
+        return _fingerprint_payload(json.loads(payload_json))
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_raw_event_for_identity(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    event_type: str,
+    identity: tuple[str, str],
+) -> sqlite3.Row | None:
+    field, value = identity
+    if field not in {"external_id", "torrent_hash"}:
+        return None
+    return conn.execute(
+        f"""
+        SELECT id, payload_fingerprint, payload_json
+        FROM raw_events
+        WHERE source = ? AND event_type = ? AND {field} = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (source, event_type, value),
+    ).fetchone()
+
+
 def insert_raw_event(
     *,
     source: str,
@@ -314,26 +814,97 @@ def insert_raw_event(
     download_id: str | None,
     payload: Any,
     observed_at: str | None = None,
-) -> None:
+) -> bool:
+    normalized_external_id = str(external_id) if external_id is not None else None
+    normalized_torrent_hash = torrent_hash.lower() if torrent_hash else None
+    normalized_download_id = str(download_id) if download_id is not None else None
+    payload_json = json.dumps(payload, default=str)
+    new_observed_at = observed_at or _utcnow()
+    identity = _raw_event_identity(
+        source,
+        event_type,
+        normalized_external_id,
+        normalized_torrent_hash,
+        normalized_download_id,
+    )
+    payload_fingerprint = (
+        _raw_event_fingerprint(
+            source=source,
+            event_type=event_type,
+            identity=identity,
+            payload=payload,
+        )
+        if identity
+        else None
+    )
+    dedup_covered = bool(
+        (source, event_type) in _DEDUP_RAW_EVENT_TYPES
+        and identity
+        and payload_fingerprint
+    )
+    latest: sqlite3.Row | None = None
+    latest_fingerprint: str | None = None
+    previous_had_fingerprint = False
+    previous_normalized_payload: Any = None
+    new_normalized_payload = _fingerprint_payload(payload)
+    if dedup_covered:
+        _dedup_audit_attempt(source, event_type)
     with _lock, _connect() as conn:
+        if dedup_covered:
+            latest = _latest_raw_event_for_identity(
+                conn,
+                source=source,
+                event_type=event_type,
+                identity=identity,
+            )
+            if latest:
+                latest_fingerprint = latest["payload_fingerprint"]
+                previous_had_fingerprint = latest_fingerprint is not None
+                previous_normalized_payload = _normalized_payload_from_json(
+                    latest["payload_json"]
+                )
+                if latest_fingerprint is None:
+                    latest_fingerprint = _fingerprint_from_payload_json(
+                        source=source,
+                        event_type=event_type,
+                        identity=identity,
+                        payload_json=latest["payload_json"],
+                    )
+                if latest_fingerprint == payload_fingerprint:
+                    _dedup_audit_suppressed(source, event_type)
+                    return False
         conn.execute(
             """
             INSERT INTO raw_events
                 (source, event_type, external_id, title, torrent_hash,
-                 download_id, payload_json, observed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 download_id, payload_json, payload_fingerprint, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source,
                 event_type,
-                str(external_id) if external_id is not None else None,
+                normalized_external_id,
                 title,
-                torrent_hash,
-                str(download_id) if download_id is not None else None,
-                json.dumps(payload, default=str),
-                observed_at or _utcnow(),
+                normalized_torrent_hash,
+                normalized_download_id,
+                payload_json,
+                payload_fingerprint,
+                new_observed_at,
             ),
         )
+    if dedup_covered and identity:
+        _dedup_audit_inserted(
+            source=source,
+            event_type=event_type,
+            identity=identity,
+            previous_row=latest,
+            previous_normalized_payload=previous_normalized_payload,
+            new_normalized_payload=new_normalized_payload,
+            new_observed_at=new_observed_at,
+            previous_had_fingerprint=previous_had_fingerprint,
+            fingerprint_changed=latest_fingerprint != payload_fingerprint,
+        )
+    return True
 
 
 def recent_events(source: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
@@ -357,6 +928,31 @@ def events_for_source_since(source: str, since_iso: str) -> list[dict[str, Any]]
         rows = conn.execute(
             "SELECT * FROM raw_events WHERE source = ? AND observed_at >= ? "
             "ORDER BY id DESC",
+            (source, since_iso),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def latest_events_for_source_since_by_hash(source: str, since_iso: str) -> list[dict[str, Any]]:
+    """Return latest raw event per torrent hash, preserving id fallback semantics."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.*
+            FROM raw_events r
+            JOIN (
+                SELECT
+                    CASE
+                        WHEN torrent_hash IS NULL OR torrent_hash = '' THEN 'id:' || id
+                        ELSE 'hash:' || lower(torrent_hash)
+                    END AS dedupe_key,
+                    MAX(id) AS max_id
+                FROM raw_events
+                WHERE source = ? AND observed_at >= ?
+                GROUP BY dedupe_key
+            ) latest ON latest.max_id = r.id
+            ORDER BY r.id DESC
+            """,
             (source, since_iso),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -1043,3 +1639,154 @@ def all_cleanup_execution_batches(limit: int = 100) -> list[dict[str, Any]]:
             item["evidence"] = {}
         out.append(item)
     return out
+
+
+def projection_snapshot(key: str) -> dict[str, Any] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM projection_snapshots WHERE projection_key = ?",
+            (key,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    for stored_key, public_key, default in (
+        ("payload_json", "payload", None),
+        ("summary_json", "summary", {}),
+    ):
+        raw = item.pop(stored_key, None)
+        if raw:
+            try:
+                item[public_key] = json.loads(raw)
+            except (TypeError, ValueError):
+                item[public_key] = default
+        else:
+            item[public_key] = default
+    return item
+
+
+def projection_snapshot_summary(key: str) -> dict[str, Any] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT projection_key, fingerprint, summary_json, source_event_count,
+                   generated_at, updated_at
+            FROM projection_snapshots
+            WHERE projection_key = ?
+            """,
+            (key,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    raw = item.pop("summary_json", None)
+    if raw:
+        try:
+            item["summary"] = json.loads(raw)
+        except (TypeError, ValueError):
+            item["summary"] = {}
+    else:
+        item["summary"] = {}
+    return item
+
+
+def upsert_projection_snapshot(
+    key: str,
+    fingerprint: str,
+    payload: Any,
+    *,
+    summary: dict[str, Any] | None = None,
+    source_event_count: int | None = None,
+) -> None:
+    now = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO projection_snapshots
+                (projection_key, fingerprint, payload_json, summary_json,
+                 source_event_count, generated_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(projection_key) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                payload_json = excluded.payload_json,
+                summary_json = excluded.summary_json,
+                source_event_count = excluded.source_event_count,
+                generated_at = excluded.generated_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                fingerprint,
+                json.dumps(payload, default=str),
+                json.dumps(summary or {}, default=str),
+                source_event_count,
+                now,
+                now,
+            ),
+        )
+
+
+def table_fingerprint(table: str) -> dict[str, Any]:
+    allowed = {
+        "cleanup_events",
+        "import_events",
+        "library_artifacts",
+        "handoff_traces",
+        "cleanup_executions",
+        "cleanup_execution_batches",
+        "recommendations",
+        "raw_events",
+    }
+    if table not in allowed:
+        raise ValueError(f"Unsupported fingerprint table: {table}")
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id FROM {table}"
+        ).fetchone()
+    return {"table": table, "count": row["count"], "max_id": row["max_id"]}
+
+
+def raw_event_fingerprint(source: str, event_type: str | None = None) -> dict[str, Any]:
+    with _lock, _connect() as conn:
+        if event_type is None:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+                FROM raw_events
+                WHERE source = ?
+                """,
+                (source,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+                FROM raw_events
+                WHERE source = ? AND event_type = ?
+                """,
+                (source, event_type),
+            ).fetchone()
+    return {
+        "table": "raw_events",
+        "source": source,
+        "event_type": event_type,
+        "count": row["count"],
+        "max_id": row["max_id"],
+    }
+
+
+def completed_cleanup_execution_fingerprint() -> dict[str, Any]:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+            FROM cleanup_executions
+            WHERE execution_status = 'Completed'
+            """
+        ).fetchone()
+    return {
+        "table": "cleanup_executions",
+        "execution_status": "Completed",
+        "count": row["count"],
+        "max_id": row["max_id"],
+    }

@@ -10,28 +10,56 @@ import { ValidationStatusCard } from "./components/ValidationStatusCard";
 import { IntegrationStatusList } from "./components/IntegrationStatusList";
 import { StorageStatusCard } from "./components/StorageStatusCard";
 import { RecentIssuesCard } from "./components/RecentIssuesCard";
-import { PageRefreshControls } from "@/components/PageRefreshControls";
+import { AuditProfiler, measureSync, useRouteAudit } from "@/perf/audit";
 
 /* Sprint 5 Health screen. Monitoring + visibility only — no mutation
    buttons. State handling is per-card; no full-page spinner. */
 export function HealthPage() {
   const { validation, storage, imports, qbit, radarr, seerr } = useHealthData();
-  const queries = [validation, storage, imports, qbit, radarr, seerr];
+  const dataReady =
+    !validation.isLoading &&
+    !storage.isLoading &&
+    !imports.isLoading &&
+    !qbit.isLoading &&
+    !radarr.isLoading &&
+    !seerr.isLoading;
+  useRouteAudit("Health", dataReady, {
+    validation_status: validation.status,
+    storage_status: storage.status,
+    imports_status: imports.status,
+    qbit_status: qbit.status,
+    radarr_status: radarr.status,
+    seerr_status: seerr.status,
+  });
 
   const integrations = useMemo(
     () =>
-      buildIntegrations({
-        qbit: qbit.data,
-        radarr: radarr.data,
-        seerr: seerr.data,
-        storage: storage.data,
-        imports: imports.data,
-      }),
+      measureSync("transform", "Health.buildIntegrations", () =>
+        buildIntegrations({
+          qbit: qbit.data,
+          radarr: radarr.data,
+          seerr: seerr.data,
+          storage: storage.data,
+          imports: imports.data,
+        }),
+      ),
     [qbit.data, radarr.data, seerr.data, storage.data, imports.data],
   );
 
-  const counts = useMemo(() => countByStatus(integrations), [integrations]);
-  const overall = useMemo(() => rollupStatus(integrations), [integrations]);
+  const counts = useMemo(
+    () =>
+      measureSync("transform", "Health.countByStatus", () =>
+        countByStatus(integrations),
+      ),
+    [integrations],
+  );
+  const overall = useMemo(
+    () =>
+      measureSync("transform", "Health.rollupStatus", () =>
+        rollupStatus(integrations),
+      ),
+    [integrations],
+  );
 
   const lastValidation = validation.dataUpdatedAt
     ? new Date(validation.dataUpdatedAt).toLocaleString()
@@ -53,40 +81,45 @@ export function HealthPage() {
           Is Handoffarr healthy? Which integrations are healthy? What requires
           attention? This page is read-only.
         </p>
-        <PageRefreshControls
-          dataUpdatedAt={Math.max(...queries.map((query) => query.dataUpdatedAt))}
-          isFetching={queries.some((query) => query.isFetching)}
-          onRefresh={() => { queries.forEach((query) => void query.refetch()); }}
-        />
       </header>
 
-      <HealthSummaryBanner
-        overall={overall}
-        counts={counts}
-        lastValidation={lastValidation}
-      />
+      <AuditProfiler id="Health.HealthSummaryBanner">
+        <HealthSummaryBanner
+          overall={overall}
+          counts={counts}
+          lastValidation={lastValidation}
+        />
+      </AuditProfiler>
 
-      <ValidationStatusCard
-        data={validation.data}
-        isLoading={validation.isLoading}
-        isError={validation.isError}
-      />
+      <AuditProfiler id="Health.ValidationStatusCard">
+        <ValidationStatusCard
+          data={validation.data}
+          isLoading={validation.isLoading}
+          isError={validation.isError}
+        />
+      </AuditProfiler>
 
-      <IntegrationStatusList
-        integrations={integrations}
-        isLoading={probesLoading}
-      />
+      <AuditProfiler id="Health.IntegrationStatusList">
+        <IntegrationStatusList
+          integrations={integrations}
+          isLoading={probesLoading}
+        />
+      </AuditProfiler>
 
-      <StorageStatusCard
-        data={storage.data}
-        isLoading={storage.isLoading}
-        isError={storage.isError}
-      />
+      <AuditProfiler id="Health.StorageStatusCard">
+        <StorageStatusCard
+          data={storage.data}
+          isLoading={storage.isLoading}
+          isError={storage.isError}
+        />
+      </AuditProfiler>
 
-      <RecentIssuesCard
-        validation={validation.data}
-        integrations={integrations}
-      />
+      <AuditProfiler id="Health.RecentIssuesCard">
+        <RecentIssuesCard
+          validation={validation.data}
+          integrations={integrations}
+        />
+      </AuditProfiler>
     </section>
   );
 }

@@ -138,6 +138,49 @@ def _download_copy_present(
     return False, {}
 
 
+def _qbit_lookup(qbit_events: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    by_hash: dict[str, dict[str, Any]] = {}
+    by_title: dict[str, dict[str, Any]] = {}
+    for event in qbit_events:
+        payload = _parse_payload(event)
+        event_hash = str(event.get("torrent_hash") or payload.get("hash") or "").lower()
+        event_title = _normalize_title(payload.get("name") or event.get("title"))
+        evidence = {
+            "source": "qbittorrent",
+            "torrent_hash": event_hash,
+            "state": payload.get("state"),
+            "save_path": payload.get("save_path"),
+        }
+        if event_hash and event_hash not in by_hash:
+            by_hash[event_hash] = {
+                **evidence,
+                "message": "Download copy still present in qBittorrent.",
+            }
+        if event_title and event_title not in by_title:
+            by_title[event_title] = {
+                **evidence,
+                "message": "Download copy matched by normalized title.",
+            }
+    return by_hash, by_title
+
+
+def _download_copy_present_from_lookup(
+    artifact: dict[str, Any],
+    import_event: dict[str, Any] | None,
+    qbit_by_hash: dict[str, dict[str, Any]],
+    qbit_by_title: dict[str, dict[str, Any]],
+) -> tuple[bool, dict[str, Any]]:
+    evidence = import_event.get("evidence") if import_event else {}
+    evidence = evidence if isinstance(evidence, dict) else {}
+    torrent_hash = str(evidence.get("torrent_hash") or "").lower()
+    title = _normalize_title(artifact.get("media_title"))
+    if torrent_hash and torrent_hash in qbit_by_hash:
+        return True, qbit_by_hash[torrent_hash]
+    if title and title in qbit_by_title:
+        return True, qbit_by_title[title]
+    return False, {}
+
+
 def build_library_artifacts(config: Config) -> list[dict[str, Any]]:
     """Build the current LibraryArtifact snapshot from raw library events."""
     lookback_minutes = int(config.app.get("lookback_minutes", 120))
@@ -208,18 +251,16 @@ def enrich_library_artifacts(
     imports_by_media = {
         str(event.get("media_id")): event for event in db.all_import_events()
     }
-    qbit_events = _latest_by(
-        db.events_for_source_since("qbittorrent", since),
-        lambda e: e.get("torrent_hash"),
-    )
+    qbit_events = db.latest_events_for_source_since_by_hash("qbittorrent", since)
+    qbit_by_hash, qbit_by_title = _qbit_lookup(qbit_events)
 
     enriched: list[dict[str, Any]] = []
     for artifact in artifacts:
         item = dict(artifact)
         import_event = imports_by_media.get(str(item.get("media_id")))
         status = _status_for_artifact(item, import_event)
-        download_present, download_evidence = _download_copy_present(
-            item, import_event, qbit_events
+        download_present, download_evidence = _download_copy_present_from_lookup(
+            item, import_event, qbit_by_hash, qbit_by_title
         )
         import_success = bool(
             import_event and import_event.get("import_status") == IMPORT_SUCCESS
@@ -272,6 +313,13 @@ def library_response(
     config: Config,
 ) -> dict[str, Any]:
     enriched = enrich_library_artifacts(artifacts, config)
+    return library_response_from_enriched(enriched)
+
+
+def library_response_from_enriched(
+    enriched: list[dict[str, Any]],
+    projection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "summary": summarize_library(enriched),
         "present": [
@@ -287,6 +335,7 @@ def library_response(
             item for item in enriched if item.get("potential_cleanup_candidate")
         ],
         "artifacts": enriched,
+        "projection": projection or {},
     }
 
 

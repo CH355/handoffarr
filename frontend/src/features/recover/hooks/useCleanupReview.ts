@@ -3,41 +3,56 @@ import {
   getCleanupReview,
   getCleanupSummary,
   getCleanupExecutions,
-  type CleanupExecutionsResponse,
+  getCleanupExecutionBatchDetail,
   type CleanupReviewFilters,
 } from "@/api/cleanupApi";
-import { useRefreshQueryOptions } from "@/hooks/useRefreshQueryOptions";
 
 /* Per frontend-implementation-spec-v1.md §6.2/§6.3. */
 
 export function useCleanupSummaryQuery() {
-  const medium = useRefreshQueryOptions("medium");
   return useQuery({
     queryKey: ["cleanup"],
     queryFn: getCleanupSummary,
-    ...medium,
+    staleTime: 30_000,
   });
 }
 
 export function useCleanupReviewQuery(filters: CleanupReviewFilters = {}) {
-  const medium = useRefreshQueryOptions("medium");
   return useQuery({
     queryKey: ["cleanup", "review", filters],
     queryFn: () => getCleanupReview(filters),
-    ...medium,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 }
 
-export function useCleanupExecutionsQuery() {
-  const medium = useRefreshQueryOptions("medium");
+export function useCleanupExecutionsQuery(limit = 100) {
   return useQuery({
-    queryKey: ["cleanup", "executions"],
-    queryFn: () => getCleanupExecutions(50),
-    ...medium,
-    refetchInterval: (query) => hasStartedExecution(query.state.data) ? 15_000 : false,
+    queryKey: ["cleanup", "executions", limit],
+    queryFn: () => getCleanupExecutions(limit),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActive =
+        data?.executions.some((e) =>
+          ["Queued", "Running"].includes(String(e.execution_status ?? "")),
+        ) ||
+        data?.batches.some((b) => ["Queued", "Running"].includes(String(b.status ?? "")));
+      return hasActive ? 2_000 : false;
+    },
   });
 }
 
-function hasStartedExecution(data: CleanupExecutionsResponse | undefined) {
-  return data?.executions.some((execution) => execution.execution_status === "Started") ?? false;
+export function useCleanupBatchDetailQuery(batchId: string | undefined) {
+  return useQuery({
+    queryKey: ["cleanup", "execution-batches", batchId],
+    queryFn: () => getCleanupExecutionBatchDetail(batchId ?? ""),
+    enabled: Boolean(batchId),
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const status = String(query.state.data?.status ?? "");
+      return ["Queued", "Running"].includes(status) ? 2_000 : false;
+    },
+  });
 }

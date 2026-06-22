@@ -239,7 +239,6 @@ export interface CleanupExecutionRow {
   blocking_reasons?: string[];
   created_at?: string | null;
   completed_at?: string | null;
-  evidence?: Record<string, unknown>;
 }
 
 export interface CleanupExecutionBatchRow {
@@ -252,7 +251,6 @@ export interface CleanupExecutionBatchRow {
   actual_recovered_bytes?: number | null;
   created_at?: string | null;
   completed_at?: string | null;
-  evidence?: Record<string, unknown>;
 }
 
 export interface CleanupExecutionsResponse {
@@ -263,6 +261,33 @@ export interface CleanupExecutionsResponse {
 
 export function getCleanupExecutions(limit = 100): Promise<CleanupExecutionsResponse> {
   return request<CleanupExecutionsResponse>(`/api/cleanup/executions?limit=${limit}`);
+}
+
+export interface CleanupExecutionDetail extends CleanupExecutionRow {
+  confirmation_phrase?: string | null;
+  evidence?: Record<string, unknown>;
+  status_transitions?: Array<Record<string, unknown>>;
+}
+
+export interface CleanupExecutionBatchDetail extends CleanupExecutionBatchRow {
+  evidence?: Record<string, unknown>;
+  status_transitions?: Array<Record<string, unknown>>;
+}
+
+export function getCleanupExecutionDetail(
+  executionId: string,
+): Promise<CleanupExecutionDetail> {
+  return request<CleanupExecutionDetail>(
+    `/api/cleanup/executions/${encodeURIComponent(executionId)}`,
+  );
+}
+
+export function getCleanupExecutionBatchDetail(
+  batchId: string,
+): Promise<CleanupExecutionBatchDetail> {
+  return request<CleanupExecutionBatchDetail>(
+    `/api/cleanup/execution-batches/${encodeURIComponent(batchId)}`,
+  );
 }
 
 /* --- Dry-run / execute ----------------------------------------------- */
@@ -361,7 +386,6 @@ export interface CleanupBatchExecuteResult {
   failed_count?: number;
   planned_recoverable_bytes?: number;
   actual_recovered_bytes?: number;
-  total_recovered_bytes?: number;
   per_item?: Array<Record<string, unknown>>;
   blocking_reasons?: string[];
   [key: string]: unknown;

@@ -12,7 +12,7 @@ import { ItemDetailSurface } from "@/features/itemDetail/ItemDetailSurface";
 import { HealthPage } from "@/features/health/HealthPage";
 import { IntegrationDetailPage } from "@/features/health/IntegrationDetailPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
-import { DiagnosticsRoute } from "@/features/diagnostics/DiagnosticsRoute";
+import { AuditProfiler } from "@/perf/audit";
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
    Sprint 3 adds the Recover Space sub-routes (§4.2). */
@@ -21,8 +21,8 @@ export const router = createBrowserRouter([
     path: "/",
     element: <AppShell />,
     children: [
-      { index: true, element: <HomePage /> },
-      { path: "recover", element: <RecoverSpacePage /> },
+      { index: true, element: <AuditProfiler id="route:Home"><HomePage /></AuditProfiler> },
+      { path: "recover", element: <AuditProfiler id="route:Recover"><RecoverSpacePage /></AuditProfiler> },
       { path: "recover/safe", element: <SafeCandidateReviewPage /> },
       { path: "recover/judgment", element: <ItemJudgmentPage /> },
       { path: "recover/preview", element: <PreviewPage /> },
@@ -30,16 +30,15 @@ export const router = createBrowserRouter([
       { path: "recover/history/:batchId", element: <CleanupBatchDetailPage /> },
       {
         path: "library",
-        element: <LibraryPage />,
-        children: [{ path: ":mediaId", element: <ItemDetailSurface /> }],
+        element: <AuditProfiler id="route:Library"><LibraryPage /></AuditProfiler>,
+        children: [{ path: ":mediaId", element: <AuditProfiler id="route:ItemDetail"><ItemDetailSurface /></AuditProfiler> }],
       },
-      { path: "health", element: <HealthPage /> },
+      { path: "health", element: <AuditProfiler id="route:Health"><HealthPage /></AuditProfiler> },
       {
         path: "health/integrations/:integrationId",
         element: <IntegrationDetailPage />,
       },
-      { path: "settings", element: <SettingsPage /> },
-      { path: "settings/diagnostics", element: <DiagnosticsRoute /> },
+      { path: "settings", element: <AuditProfiler id="route:Settings"><SettingsPage /></AuditProfiler> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

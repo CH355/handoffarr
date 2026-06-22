@@ -34,7 +34,6 @@ from .collectors import (
 )
 from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visibility
 from .cleanup_review import (
-    build_cleanup_review,
     cleanup_action_plan_response,
     cleanup_action_plan_text,
     cleanup_review_response,
@@ -59,8 +58,16 @@ from .imports import imports_response, media_import_response, run_import_visibil
 from .import_debug import inspect_imports
 from .library import (
     library_response,
+    library_response_from_enriched,
     media_library_response,
     run_library_visibility,
+)
+from .projections import (
+    cleanup_review_projection,
+    cleanup_review_projection_summary,
+    library_enriched_projection,
+    rebuild_cleanup_review_projection,
+    rebuild_library_enriched_projection,
 )
 from .recommendations import (
     run_recommendations,
@@ -133,6 +140,8 @@ def poll_once() -> dict[str, int]:
             "responsibility": 0,
             "recommendations": 0,
             "timeline": 0,
+            "cleanup_review_projection": 0,
+            "library_projection": 0,
         }
 
     for name, fn in (
@@ -166,6 +175,12 @@ def poll_once() -> dict[str, int]:
         logger.error("Library visibility crashed: %s", exc)
         results["library"] = 0
     try:
+        projection = rebuild_library_enriched_projection(config)
+        results["library_projection"] = len(projection["artifacts"])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Library projection crashed: %s", exc)
+        results["library_projection"] = 0
+    try:
         results["cleanup_collector"] = cleanup_collector.collect(config)
     except Exception as exc:  # noqa: BLE001
         logger.error("Cleanup collector crashed: %s", exc)
@@ -180,6 +195,12 @@ def poll_once() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Correlation crashed: %s", exc)
         results["traces"] = 0
+    try:
+        projection = rebuild_cleanup_review_projection(config)
+        results["cleanup_review_projection"] = len(projection["items"])
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Cleanup review projection crashed: %s", exc)
+        results["cleanup_review_projection"] = 0
     try:
         results["decision_collector"] = decision_collector.collect(config)
     except Exception as exc:  # noqa: BLE001
@@ -307,7 +328,19 @@ async def api_import_media(media_id: str) -> JSONResponse:
 
 @app.get("/api/library")
 async def api_library() -> JSONResponse:
-    return JSONResponse(library_response(db.all_library_artifacts(), get_config()))
+    config = get_config()
+    projection = library_enriched_projection(config)
+    artifacts = projection["artifacts"]
+    if artifacts:
+        return JSONResponse(
+            library_response_from_enriched(
+                artifacts,
+                projection=projection["projection"],
+            )
+        )
+    payload = library_response(db.all_library_artifacts(), config)
+    payload["projection"] = projection["projection"]
+    return JSONResponse(payload)
 
 
 @app.get("/api/library/{media_id}")
@@ -322,14 +355,12 @@ async def api_cleanup() -> JSONResponse:
     return JSONResponse(cleanup_response(db.all_cleanup_events()))
 
 
+def _cleanup_review_snapshot() -> dict:
+    return cleanup_review_projection(get_config())
+
+
 def _cleanup_review_items() -> list[dict]:
-    return build_cleanup_review(
-        db.all_cleanup_events(),
-        db.all_import_events(),
-        db.all_library_artifacts(),
-        db.all_traces(),
-        get_config(),
-    )
+    return _cleanup_review_snapshot()["items"]
 
 
 @app.get("/api/cleanup/action-plan")
@@ -460,9 +491,10 @@ async def api_cleanup_review(
     offset: int = 0,
     sort: str | None = None,
 ) -> JSONResponse:
+    snapshot = _cleanup_review_snapshot()
     return JSONResponse(
         cleanup_review_response(
-            _cleanup_review_items(),
+            snapshot["items"],
             review_class=review_class,
             match_strength=match_strength,
             min_recoverable_bytes=min_recoverable_bytes,
@@ -471,6 +503,7 @@ async def api_cleanup_review(
             limit=limit,
             offset=offset,
             sort=sort,
+            projection=snapshot["projection"],
         )
     )
 
@@ -660,6 +693,11 @@ async def debug_correlation() -> JSONResponse:
     return JSONResponse({"matches": matches})
 
 
+@app.get("/api/debug/raw-event-dedup-audit")
+async def debug_raw_event_dedup_audit() -> JSONResponse:
+    return JSONResponse(db.raw_event_dedup_audit_snapshot())
+
+
 @app.get("/api/debug/radarr-fields")
 async def debug_radarr_fields() -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(radarr.discover_fields, get_config()))
@@ -680,7 +718,18 @@ async def debug_imports() -> JSONResponse:
 @app.get("/api/validation")
 async def api_validation() -> JSONResponse:
     config = get_config()
-    result = await asyncio.to_thread(run_validation, config)
+    cleanup_projection = cleanup_review_projection_summary(config)
+    library_projection = library_enriched_projection(config)
+    result = await asyncio.to_thread(
+        run_validation,
+        config,
+        artifacts=library_projection["artifacts"] or None,
+        review_items=None,
+        projection={
+            "cleanup_review": cleanup_projection,
+            "library": library_projection["projection"],
+        },
+    )
     status_code = 200 if result["status"] != "FAIL" else 200
     return JSONResponse(result, status_code=status_code)
 

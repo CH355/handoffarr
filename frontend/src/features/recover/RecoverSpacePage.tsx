@@ -5,32 +5,38 @@ import { EmptyState } from "@/components/EmptyState";
 import { formatBytes } from "@/lib/formatBytes";
 import { RecommendationCard } from "./components/RecommendationCard";
 import { useCleanupReviewQuery } from "./hooks/useCleanupReview";
-import { PageRefreshControls } from "@/components/PageRefreshControls";
+import { measureSync, useRouteAudit } from "@/perf/audit";
 
 /* RecoverSpacePage — Mockups §2 three-section recommendation pattern.
    The stat tiles in the cards are non-clickable; navigation happens through
    the explicit Review actions. */
 export function RecoverSpacePage() {
   const review = useCleanupReviewQuery();
+  useRouteAudit("Recover", !review.isLoading, {
+    review_status: review.status,
+    candidate_count: review.data?.pagination?.total,
+  });
 
   const summary = review.data?.summary;
   const totals = useMemo(() => {
-    if (!summary) {
+    return measureSync("transform", "Recover.computeTotals", () => {
+      if (!summary) {
+        return {
+          safeCount: 0,
+          safeRecoverable: 0,
+          riskyCount: 0,
+          unknownCount: 0,
+          totalRecoverable: 0,
+        };
+      }
       return {
-        safeCount: 0,
-        safeRecoverable: 0,
-        riskyCount: 0,
-        unknownCount: 0,
-        totalRecoverable: 0,
+        safeCount: summary.safe_candidate_count,
+        safeRecoverable: summary.safe_recoverable_bytes,
+        riskyCount: summary.risky_candidate_count,
+        unknownCount: summary.unknown_evidence_count + summary.missing_library_count,
+        totalRecoverable: summary.recoverable_bytes,
       };
-    }
-    return {
-      safeCount: summary.safe_candidate_count,
-      safeRecoverable: summary.safe_recoverable_bytes,
-      riskyCount: summary.risky_candidate_count,
-      unknownCount: summary.unknown_evidence_count + summary.missing_library_count,
-      totalRecoverable: summary.recoverable_bytes,
-    };
+    });
   }, [summary]);
 
   return (
@@ -46,11 +52,6 @@ export function RecoverSpacePage() {
           Review what Handoffarr has classified before any deletion. Handoffarr never
           removes a file on its own — every action requires explicit confirmation.
         </p>
-        <PageRefreshControls
-          dataUpdatedAt={review.dataUpdatedAt}
-          isFetching={review.isFetching}
-          onRefresh={() => { void review.refetch(); }}
-        />
       </header>
 
       {review.isLoading ? (

@@ -1,10 +1,78 @@
+name: handoffarr
 services:
-  handoffarr:
-    build: .
-    container_name: handoffarr
-    ports:
-      - "8099:8099"
-    volumes:
-      - ./config:/config
-      - ./data:/data
-    restart: unless-stopped
+    handoffarr:
+        build:
+            context: /DATA/AppData/handoffarr
+            dockerfile: Dockerfile
+        cpu_shares: 90
+        command: []
+        container_name: handoffarr
+        deploy:
+            resources:
+                limits:
+                    memory: "6180306944"
+        hostname: handoffarr
+        image: local/handoffarr:latest
+        networks:
+            default: null
+        ports:
+            - mode: ingress
+              target: 8099
+              published: "8099"
+              protocol: tcp
+        restart: unless-stopped
+        volumes:
+            - type: bind
+              source: /DATA/AppData/handoffarr/config
+              target: /config
+              bind:
+                create_host_path: true
+            - type: bind
+              source: /DATA/AppData/handoffarr/data
+              target: /data
+              bind:
+                create_host_path: true
+            - type: bind
+              source: /DATA/complete
+              target: /downloads
+              read_only: true
+              bind:
+                create_host_path: true
+            - type: bind
+              source: /DATA/incomplete
+              target: /incomplete
+              read_only: true
+              bind:
+                create_host_path: true
+            - type: bind
+              source: /mnt/192.168.55.19/PlexMedia/Movies
+              target: /movies
+              read_only: true
+              bind:
+                create_host_path: true
+            - type: bind
+              source: /mnt/192.168.55.19/PlexMedia/Music
+              target: /music
+              read_only: true
+              bind:
+                create_host_path: true
+            - type: bind
+              source: /mnt/192.168.55.19/PlexMedia/Shows
+              target: /tv
+              read_only: true
+              bind:
+                create_host_path: true
+networks:
+    default:
+        name: handoffarr_default
+x-casaos:
+    author: self
+    category: self
+    hostname: ""
+    icon: ""
+    index: /
+    is_uncontrolled: false
+    port_map: "8099"
+    scheme: http
+    title:
+        custom: handoffarr

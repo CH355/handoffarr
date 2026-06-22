@@ -4,18 +4,32 @@ import { IntegrationSettingsCard } from "./components/IntegrationSettingsCard";
 import { CleanupSettingsCard } from "./components/CleanupSettingsCard";
 import { RuntimeSettingsCard } from "./components/RuntimeSettingsCard";
 import { AboutCard } from "./components/AboutCard";
-import { ModeSettingsCard } from "./components/ModeSettingsCard";
-import { DiagnosticsSettingsCard } from "./components/DiagnosticsSettingsCard";
-import { RefreshBehaviorSettingsCard } from "./components/RefreshBehaviorSettingsCard";
-import { useModeStore } from "@/app/stores/useModeStore";
-import { PageRefreshControls } from "@/components/PageRefreshControls";
+import { AuditProfiler, useRouteAudit } from "@/perf/audit";
 
-/* Settings remains a configuration visibility surface. Sprint 7 adds only
-   the client-side Mode control and Expert-gated Diagnostics entry. */
+/* Sprint 6 Settings page.
+
+   Configuration visibility surface only. Every value rendered originates
+   from an endpoint that already exists in app/main.py — no invented
+   fields, no fabricated save endpoints, no Diagnostics / Expert chrome
+   (those are out of scope per the sprint brief). All cards degrade
+   independently per frontend-implementation-spec-v1.md §7.2. */
 export function SettingsPage() {
-  const mode = useModeStore((s) => s.mode);
   const { health, qbit, radarr, seerr, storage, executions } = useSettingsData();
-  const queries = [health, qbit, radarr, seerr, storage, executions];
+  const dataReady =
+    !health.isLoading &&
+    !qbit.isLoading &&
+    !radarr.isLoading &&
+    !seerr.isLoading &&
+    !storage.isLoading &&
+    !executions.isLoading;
+  useRouteAudit("Settings", dataReady, {
+    health_status: health.status,
+    qbit_status: qbit.status,
+    radarr_status: radarr.status,
+    seerr_status: seerr.status,
+    storage_status: storage.status,
+    executions_status: executions.status,
+  });
 
   return (
     <section
@@ -30,63 +44,63 @@ export function SettingsPage() {
           How Handoffarr is configured, which integrations are wired up, where
           data comes from, and what operational limits are in effect.
         </p>
-        <PageRefreshControls
-          dataUpdatedAt={Math.max(...queries.map((query) => query.dataUpdatedAt))}
-          isFetching={queries.some((query) => query.isFetching)}
-          onRefresh={() => { queries.forEach((query) => void query.refetch()); }}
-        />
       </header>
 
-      <GeneralSettingsCard
-        health={health.data}
-        isLoading={health.isLoading}
-        isError={health.isError}
-      />
+      <AuditProfiler id="Settings.GeneralSettingsCard">
+        <GeneralSettingsCard
+          health={health.data}
+          isLoading={health.isLoading}
+          isError={health.isError}
+        />
+      </AuditProfiler>
 
-      <IntegrationSettingsCard
-        rows={[
-          {
-            id: "qbittorrent",
-            name: "qBittorrent",
-            probe: qbit.data,
-            isLoading: qbit.isLoading,
-            isError: qbit.isError,
-          },
-          {
-            id: "radarr",
-            name: "Radarr",
-            probe: radarr.data,
-            isLoading: radarr.isLoading,
-            isError: radarr.isError,
-          },
-          {
-            id: "seerr",
-            name: "Overseerr",
-            probe: seerr.data,
-            isLoading: seerr.isLoading,
-            isError: seerr.isError,
-          },
-        ]}
-      />
+      <AuditProfiler id="Settings.IntegrationSettingsCard">
+        <IntegrationSettingsCard
+          rows={[
+            {
+              id: "qbittorrent",
+              name: "qBittorrent",
+              probe: qbit.data,
+              isLoading: qbit.isLoading,
+              isError: qbit.isError,
+            },
+            {
+              id: "radarr",
+              name: "Radarr",
+              probe: radarr.data,
+              isLoading: radarr.isLoading,
+              isError: radarr.isError,
+            },
+            {
+              id: "seerr",
+              name: "Overseerr",
+              probe: seerr.data,
+              isLoading: seerr.isLoading,
+              isError: seerr.isError,
+            },
+          ]}
+        />
+      </AuditProfiler>
 
-      <CleanupSettingsCard
-        config={executions.data?.config}
-        isLoading={executions.isLoading}
-        isError={executions.isError}
-      />
+      <AuditProfiler id="Settings.CleanupSettingsCard">
+        <CleanupSettingsCard
+          config={executions.data?.config}
+          isLoading={executions.isLoading}
+          isError={executions.isError}
+        />
+      </AuditProfiler>
 
-      <RuntimeSettingsCard
-        storage={storage.data}
-        isLoading={storage.isLoading}
-        isError={storage.isError}
-      />
+      <AuditProfiler id="Settings.RuntimeSettingsCard">
+        <RuntimeSettingsCard
+          storage={storage.data}
+          isLoading={storage.isLoading}
+          isError={storage.isError}
+        />
+      </AuditProfiler>
 
-      <ModeSettingsCard />
-      <RefreshBehaviorSettingsCard />
-
-      {mode === "expert" ? <DiagnosticsSettingsCard /> : null}
-
-      <AboutCard />
+      <AuditProfiler id="Settings.AboutCard">
+        <AboutCard />
+      </AuditProfiler>
     </section>
   );
 }
