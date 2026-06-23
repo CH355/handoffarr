@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from . import db
+from . import db, states
 from .cleanup import CLEANUP_COMPLETED, CLEANUP_FAILED, CLEANUP_PENDING
 from .cleanup_reconciliation import (
     latest_completed_execution_index,
@@ -104,6 +104,111 @@ def _with_qbit_hash(item: dict[str, Any]) -> dict[str, Any]:
         item.setdefault("qbit_hash", None)
     return item
 
+
+def _pipeline_explanation(
+    *,
+    review_class: str,
+    reason: str,
+    import_success: bool,
+    library_present: bool,
+    library_missing: bool,
+    download_present: bool,
+    torrent_state: str,
+    cleanup_status: str | None,
+    cleanup_recoverable: int,
+    match_strength: str,
+    execution_reconciled: bool,
+) -> dict[str, str]:
+    state_label = torrent_state or "unknown"
+    state_class = states.classify(torrent_state)
+
+    if review_class == ALREADY_CLEANED or execution_reconciled:
+        return {
+            "category": "already_cleaned",
+            "title": "Already cleaned",
+            "detail": reason,
+            "stage": "Cleanup execution",
+            "last_event": "Cleanup confirmed",
+        }
+
+    if cleanup_status == CLEANUP_FAILED:
+        return {
+            "category": "cleanup_failed",
+            "title": "Cleanup blocked",
+            "detail": reason,
+            "stage": "Cleanup evidence",
+            "last_event": "Cleanup failed",
+        }
+
+    if state_class in {states.DOWNLOADING, states.QUEUED, states.STALLED, states.PAUSED, states.ERROR}:
+        title = "Still downloading"
+        if state_class == states.QUEUED:
+            title = "Waiting in qBittorrent"
+        elif state_class == states.STALLED:
+            title = "Download stalled"
+        elif state_class == states.PAUSED:
+            title = "Download paused"
+        elif state_class == states.ERROR:
+            title = "Torrent error"
+        return {
+            "category": "downloading",
+            "title": title,
+            "detail": f"qBittorrent reports {state_label}; cleanup is not confirmed safe yet.",
+            "stage": f"qBittorrent · {state_label}",
+            "last_event": "Torrent state observed",
+        }
+
+    if not import_success and download_present:
+        return {
+            "category": "awaiting_import",
+            "title": "Queued for import",
+            "detail": "The download copy is present, but import success is not confirmed.",
+            "stage": "Import evidence",
+            "last_event": "Import not confirmed",
+        }
+
+    if library_missing:
+        return {
+            "category": "missing_library",
+            "title": "Missing library evidence",
+            "detail": reason,
+            "stage": "Library evidence",
+            "last_event": "Library missing",
+        }
+
+    if review_class == SAFE_REVIEW:
+        return {
+            "category": "redundant_reviewable",
+            "title": "Library already has item",
+            "detail": "Import, library, and retained download evidence agree; review before cleanup.",
+            "stage": "Decision · safe to review",
+            "last_event": f"{match_strength} evidence",
+        }
+
+    if import_success and library_present and download_present:
+        if cleanup_recoverable > 0 and cleanup_status == CLEANUP_PENDING:
+            return {
+                "category": "cleanup_pending",
+                "title": "Imported but retained",
+                "detail": "The library item exists and the retained download still occupies space.",
+                "stage": "Cleanup evidence",
+                "last_event": "Retained copy observed",
+            }
+        return {
+            "category": "imported_retained",
+            "title": "Imported but retained",
+            "detail": "Import and library evidence exist, but cleanup needs stronger confirmation.",
+            "stage": "Library artifact · present",
+            "last_event": "Retained copy observed",
+        }
+
+    return {
+        "category": "unknown",
+        "title": "Needs review",
+        "detail": reason or "There is not enough evidence to explain why this item is retained.",
+        "stage": "Evidence review",
+        "last_event": "No strong explanation",
+    }
 
 def _parse_payload(event: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -485,6 +590,20 @@ def _classify_item(
         review_class = UNKNOWN_EVIDENCE
         reason = "There is not enough evidence to decide safely."
 
+    pipeline_explanation = _pipeline_explanation(
+        review_class=review_class,
+        reason=reason,
+        import_success=import_success,
+        library_present=library_present,
+        library_missing=library_missing,
+        download_present=download_present,
+        torrent_state=torrent_state,
+        cleanup_status=cleanup_event.get("cleanup_status"),
+        cleanup_recoverable=cleanup_recoverable,
+        match_strength=match_strength,
+        execution_reconciled=execution_reconciled,
+    )
+
     checks = {
         "import_success": import_success,
         "library_status": library_status,
@@ -514,6 +633,7 @@ def _classify_item(
         "excluded_by_dedupe": False,
         "review_class": review_class,
         "reason": reason,
+        "pipeline_explanation": pipeline_explanation,
         "risk_reasons": risk_reasons,
         "safe_reasons": safe_reasons,
         "match_strength": match_strength,

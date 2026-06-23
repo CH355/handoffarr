@@ -53,6 +53,25 @@ export type MatchStrength =
   | "Title Only Match"
   | "No Match";
 
+export interface PipelineExplanation {
+  category?:
+    | "downloading"
+    | "awaiting_import"
+    | "imported_retained"
+    | "seeding_hold"
+    | "cleanup_pending"
+    | "cleanup_failed"
+    | "redundant_reviewable"
+    | "missing_library"
+    | "already_cleaned"
+    | "unknown"
+    | string
+    | null;
+  title?: string | null;
+  detail?: string | null;
+  stage?: string | null;
+  last_event?: string | null;
+}
 export interface CleanupReviewItem {
   cleanup_id?: string | null;
   media_id?: string | null;
@@ -63,6 +82,7 @@ export interface CleanupReviewItem {
   qbit_hash?: string | null;
   review_class?: ReviewClass | string | null;
   reason?: string | null;
+  pipeline_explanation?: PipelineExplanation | null;
   risk_reasons?: string[];
   safe_reasons?: string[];
   match_strength?: MatchStrength | string | null;

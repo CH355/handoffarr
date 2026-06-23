@@ -10,6 +10,7 @@ interface EvidencePanelProps {
 export function EvidencePanel({ item }: EvidencePanelProps) {
   const reasons = item.risk_reasons?.length ? item.risk_reasons : item.safe_reasons ?? [];
   const paths = item.paths ?? {};
+  const explanation = item.pipeline_explanation;
   return (
     <div className="flex flex-col gap-4 text-body">
       <section>
@@ -21,6 +22,22 @@ export function EvidencePanel({ item }: EvidencePanelProps) {
             : "—"}
         </p>
       </section>
+
+      {explanation ? (
+        <section className="rounded-md bg-surface-raised p-3">
+          <p className="text-meta uppercase tracking-wide text-text-subtle">Reason</p>
+          <p className="mt-1 text-subtitle text-text">
+            {explanation.title ?? "Needs review"}
+          </p>
+          {explanation.detail ? (
+            <p className="mt-1 text-body text-text-muted">{explanation.detail}</p>
+          ) : null}
+          <p className="mt-2 text-meta text-text-subtle">
+            {explanation.stage ?? "Evidence review"}
+            {explanation.last_event ? ` · ${explanation.last_event}` : ""}
+          </p>
+        </section>
+      ) : null}
 
       <dl className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2">
         <Field label="Recoverable" value={formatBytes(item.recoverable_bytes ?? 0)} />

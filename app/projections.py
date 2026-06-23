@@ -12,7 +12,7 @@ from .cleanup_review import build_cleanup_review, summarize_cleanup_review
 from .config import Config
 from .library import enrich_library_artifacts, summarize_library
 
-CLEANUP_REVIEW_KEY = "cleanup_review:v2"
+CLEANUP_REVIEW_KEY = "cleanup_review:v3"
 LIBRARY_ENRICHED_KEY = "library_enriched:v1"
 
 

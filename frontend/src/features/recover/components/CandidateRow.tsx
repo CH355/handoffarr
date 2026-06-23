@@ -26,6 +26,7 @@ export function CandidateRow({
     typeof item.confidence_score === "number"
       ? `${Math.round(item.confidence_score * 100)}%`
       : "—";
+  const explanation = item.pipeline_explanation;
 
   return (
     <li
@@ -54,7 +55,29 @@ export function CandidateRow({
             {formatBytes(item.recoverable_bytes ?? 0)}
           </p>
         </div>
-        <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-meta text-text-muted">
+        {explanation ? (
+          <div className="mt-2 flex flex-col gap-1 rounded-md bg-surface-raised px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  "rounded-pill px-2 py-0.5 text-meta font-medium",
+                  isRisky
+                    ? "bg-caution/10 text-caution"
+                    : "bg-success/10 text-success",
+                )}
+              >
+                {explanation.title ?? "Needs review"}
+              </span>
+              <span className="text-meta text-text-subtle">
+                {explanation.stage ?? "Evidence review"}
+              </span>
+            </div>
+            {explanation.detail ? (
+              <p className="text-meta text-text-muted">{explanation.detail}</p>
+            ) : null}
+          </div>
+        ) : null}
+        <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-meta text-text-muted">
           <div className="flex gap-1">
             <dt>Match</dt>
             <dd className="text-text">{item.match_strength ?? "—"}</dd>
@@ -63,6 +86,12 @@ export function CandidateRow({
             <dt>Confidence</dt>
             <dd className="text-text [font-variant-numeric:tabular-nums]">{confidence}</dd>
           </div>
+          {explanation?.last_event ? (
+            <div className="flex gap-1">
+              <dt>Last</dt>
+              <dd className="text-text">{explanation.last_event}</dd>
+            </div>
+          ) : null}
           {item.source_application ? (
             <div className="flex gap-1">
               <dt>Source</dt>
