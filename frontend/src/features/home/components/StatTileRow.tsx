@@ -52,16 +52,40 @@ function StorageTile({ state }: { state: StatTileRowProps["storage"] }) {
   const s = state.data.summary;
   const free = s.free_bytes;
   const total = s.total_bytes;
+  const retained = s.retained_bytes ?? s.completed_torrent_bytes ?? 0;
+  const completedCount = s.completed_torrent_count ?? 0;
   const usedPct =
     free != null && total != null && total > 0
       ? ((total - free) / total) * 100
       : null;
+
+  if (retained > 0) {
+    return (
+      <StatTile
+        label="Storage"
+        value={`${formatBytes(retained)} retained`}
+        supporting={`${completedCount} completed item${completedCount === 1 ? "" : "s"} to review`}
+        progressPct={usedPct}
+      />
+    );
+  }
+
+  if (free != null) {
+    return (
+      <StatTile
+        label="Storage"
+        value={`${formatBytes(free)} free`}
+        supporting={total != null ? `of ${formatBytes(total)}` : "No retained downloads found"}
+        progressPct={usedPct}
+      />
+    );
+  }
+
   return (
     <StatTile
       label="Storage"
-      value={free != null ? `${formatBytes(free)} free` : "—"}
-      supporting={total != null ? `of ${formatBytes(total)}` : undefined}
-      progressPct={usedPct}
+      value="No retained space"
+      supporting="Storage capacity is not reported yet"
     />
   );
 }

@@ -6,8 +6,29 @@ interface RecentlyAddedRowProps {
   event: ImportEvent;
 }
 
+function cleanLabel(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function filenameFromPath(value: string | null | undefined): string | null {
+  const cleaned = cleanLabel(value);
+  if (!cleaned) return null;
+  const normalized = cleaned.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return cleanLabel(parts.at(-1));
+}
+
 function buildTitle(event: ImportEvent): string {
-  const base = event.title?.trim() || event.media_id || "Untitled";
+  const base =
+    cleanLabel(event.media_title) ??
+    cleanLabel(event.title) ??
+    filenameFromPath(event.destination_path) ??
+    filenameFromPath(event.source_path) ??
+    cleanLabel(event.evidence?.torrent_name as string | null | undefined) ??
+    cleanLabel(event.media_id) ??
+    cleanLabel(event.evidence?.torrent_hash) ??
+    "Untitled";
   if (event.season != null && event.episode != null) {
     const s = String(event.season).padStart(2, "0");
     const e = String(event.episode).padStart(2, "0");
@@ -26,7 +47,7 @@ export function RecentlyAddedRow({ event }: RecentlyAddedRowProps) {
   const when = formatRelativeTime(event.import_timestamp);
   return (
     <a
-      href={`/library/${encodeURIComponent(event.media_id ?? "")}`}
+      href={`/library/${encodeURIComponent(event.media_id ?? event.evidence?.torrent_hash ?? "")}`}
       aria-label={`${title}, imported ${when}`}
       className="flex items-center gap-3 rounded-md px-3 py-2.5 transition-colors duration-fast ease-out hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg active:translate-y-px"
     >

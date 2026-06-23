@@ -9,6 +9,7 @@ export interface ImportsCounts {
 
 export interface ImportEvent {
   media_id?: string | null;
+  media_title?: string | null;
   title?: string | null;
   media_type?: string | null;
   season?: number | null;
@@ -17,6 +18,15 @@ export interface ImportEvent {
   import_status?: string | null;
   import_timestamp?: string | null;
   source_application?: string | null;
+  source_path?: string | null;
+  destination_path?: string | null;
+  evidence?: {
+    torrent_hash?: string | null;
+    torrent_name?: string | null;
+    state?: string | null;
+    message?: string | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface ImportsResponse {

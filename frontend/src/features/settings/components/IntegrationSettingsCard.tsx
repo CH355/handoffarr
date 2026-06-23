@@ -18,7 +18,7 @@ interface IntegrationSettingsCardProps {
 /* Integration Settings.
 
    Lists every integration probe exposed by app/main.py debug endpoints,
-   showing the configured base URL and connection state. Read-only: there
+   showing friendly connection and enablement state. Read-only: there
    is no PUT/POST endpoint for changing integration credentials, so the
    mockup's [Edit] button is omitted per the sprint brief ("Editable mode
    only appears when supported"). */
@@ -30,7 +30,7 @@ export function IntegrationSettingsCard({ rows }: IntegrationSettingsCardProps) 
     <SettingsCard
       id="settings-integrations"
       title="Integrations"
-      description="Discovered services and their connection state. Configuration lives in config.yaml — Handoffarr does not currently expose write endpoints."
+      description="Discovered services and whether Handoffarr can use them. Detailed warnings live in Health."
     >
       {allLoading ? (
         <LoadingState rows={3} label="Loading integrations" />
@@ -94,21 +94,23 @@ function IntegrationLine({ row }: { row: IntegrationRow }) {
           {status.label}
         </span>
       </div>
-      <p
-        className="truncate text-meta text-text-muted"
-        title={probe.url || undefined}
-      >
-        {probe.url || (enabled ? "No URL configured" : "Not configured")}
+      <p className="text-meta text-text-muted">
+        {enabled ? integrationSummary(probe) : "Not configured"}
       </p>
-      {probe.ok === false && probe.error ? (
-        <p className="text-meta text-critical">{probe.error}</p>
-      ) : null}
-      {probe.warnings && probe.warnings.length > 0 ? (
-        <p className="text-meta text-caution">
-          {probe.warnings.length} warning
-          {probe.warnings.length === 1 ? "" : "s"}
-        </p>
-      ) : null}
     </div>
   );
 }
+function integrationSummary(probe: IntegrationProbe): string {
+  if (probe.ok === true) {
+    if (typeof probe.record_count === "number") {
+      return `${probe.record_count} records visible`;
+    }
+    if (typeof probe.torrent_count === "number") {
+      return `${probe.torrent_count} torrents visible`;
+    }
+    return "Connection ready";
+  }
+  if (probe.ok === false) return "Needs attention in Health";
+  return "Status not reported";
+}
+

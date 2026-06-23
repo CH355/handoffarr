@@ -51,7 +51,7 @@ function fromProbe(
     name,
     status: probeStatus(probe),
     summary: probeSummary(probe, healthyCopy),
-    detail: probe?.error || undefined,
+    detail: probe?.error || probe?.warnings?.[0] || undefined,
     url: probe?.url,
     warnings: probe?.warnings ?? [],
     available: probe !== undefined,

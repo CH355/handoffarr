@@ -30,21 +30,18 @@ export function useHealthData() {
     queryKey: ["health", "qbit"],
     queryFn: getQbitProbe,
     ...heavy,
-    enabled: false,
     retry: 0,
   });
   const radarr = useQuery({
     queryKey: ["health", "radarr"],
     queryFn: getRadarrProbe,
     ...heavy,
-    enabled: false,
     retry: 0,
   });
   const seerr = useQuery({
     queryKey: ["health", "seerr"],
     queryFn: getSeerrProbe,
     ...heavy,
-    enabled: false,
     retry: 0,
   });
 

@@ -25,7 +25,7 @@ export function RecentlyAddedSection({ state }: RecentlyAddedSectionProps) {
           to="/library"
           className="inline-flex items-center gap-1 rounded-sm text-meta text-text-muted transition-colors duration-fast hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
         >
-          View
+          View library
           <ArrowRight size={14} aria-hidden="true" />
         </Link>
       </header>
