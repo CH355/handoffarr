@@ -411,6 +411,14 @@ _DEDUP_AUDIT_SAMPLE_LIMIT = 10
 _DEDUP_AUDIT_VALUE_LIMIT = 240
 _DEDUP_AUDIT_LIST_PREVIEW = 3
 _DEDUP_AUDIT_DEEP_DIFF_LIMIT = 40
+_QBITTORRENT_TORRENT_VOLATILE_FINGERPRINT_KEYS: frozenset[str] = frozenset(
+    {
+        "peers",
+        "seeds",
+        "tracker",
+        "uploaded",
+    }
+)
 _DEDUP_AUDIT: dict[str, dict[str, Any]] = {}
 
 
@@ -428,16 +436,30 @@ def _migrate_raw_events_dedup(conn: sqlite3.Connection) -> None:
     )
 
 
-def _fingerprint_payload(value: Any) -> Any:
+def _fingerprint_payload(
+    value: Any,
+    volatile_keys: frozenset[str] = _VOLATILE_FINGERPRINT_KEYS,
+) -> Any:
     if isinstance(value, dict):
         return {
-            str(k): _fingerprint_payload(v)
+            str(k): _fingerprint_payload(v, volatile_keys)
             for k, v in value.items()
-            if str(k) not in _VOLATILE_FINGERPRINT_KEYS
+            if str(k) not in volatile_keys
         }
     if isinstance(value, list):
-        return [_fingerprint_payload(item) for item in value]
+        return [_fingerprint_payload(item, volatile_keys) for item in value]
     return value
+
+
+def _fingerprint_payload_for_event(source: str, event_type: str, value: Any) -> Any:
+    volatile_keys = _VOLATILE_FINGERPRINT_KEYS
+    if source == "qbittorrent" and event_type == "torrent":
+        volatile_keys = volatile_keys | _QBITTORRENT_TORRENT_VOLATILE_FINGERPRINT_KEYS
+    return _fingerprint_payload(value, volatile_keys)
+
+
+def _recompute_latest_fingerprint(source: str, event_type: str) -> bool:
+    return source == "qbittorrent" and event_type == "torrent"
 
 
 def _dedup_audit_key(source: str, event_type: str) -> str:
@@ -696,6 +718,10 @@ def _dedup_audit_inserted(
             previous_normalized_payload,
             new_normalized_payload,
         )
+        deep_diff = _payload_deep_diff(
+            previous_normalized_payload,
+            new_normalized_payload,
+        )
         sample = {
             "source": source,
             "event_type": event_type,
@@ -707,6 +733,7 @@ def _dedup_audit_inserted(
             "changed_keys": changed_keys[:30],
             "changed_key_count": len(changed_keys),
             "changes": changes,
+            "deep_diff": deep_diff,
         }
         bucket["diff_samples"].append(sample)
         bucket["logged_diff_samples"] += 1
@@ -749,7 +776,7 @@ def _raw_event_fingerprint(
         "source": source,
         "event_type": event_type,
         "identity": identity,
-        "payload": _fingerprint_payload(payload),
+        "payload": _fingerprint_payload_for_event(source, event_type, payload),
     }
     encoded = json.dumps(body, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -762,7 +789,11 @@ def _fingerprint_from_payload_json(
     identity: tuple[str, str],
     payload_json: str | None,
 ) -> str | None:
-    payload = _normalized_payload_from_json(payload_json)
+    payload = _normalized_payload_from_json(
+        payload_json,
+        source=source,
+        event_type=event_type,
+    )
     if payload is None:
         return None
     return _raw_event_fingerprint(
@@ -773,11 +804,16 @@ def _fingerprint_from_payload_json(
     )
 
 
-def _normalized_payload_from_json(payload_json: str | None) -> Any:
+def _normalized_payload_from_json(
+    payload_json: str | None,
+    *,
+    source: str,
+    event_type: str,
+) -> Any:
     if not payload_json:
         return None
     try:
-        return _fingerprint_payload(json.loads(payload_json))
+        return _fingerprint_payload_for_event(source, event_type, json.loads(payload_json))
     except (TypeError, ValueError):
         return None
 
@@ -846,7 +882,7 @@ def insert_raw_event(
     latest_fingerprint: str | None = None
     previous_had_fingerprint = False
     previous_normalized_payload: Any = None
-    new_normalized_payload = _fingerprint_payload(payload)
+    new_normalized_payload = _fingerprint_payload_for_event(source, event_type, payload)
     if dedup_covered:
         _dedup_audit_attempt(source, event_type)
     with _lock, _connect() as conn:
@@ -861,9 +897,14 @@ def insert_raw_event(
                 latest_fingerprint = latest["payload_fingerprint"]
                 previous_had_fingerprint = latest_fingerprint is not None
                 previous_normalized_payload = _normalized_payload_from_json(
-                    latest["payload_json"]
+                    latest["payload_json"],
+                    source=source,
+                    event_type=event_type,
                 )
-                if latest_fingerprint is None:
+                if latest_fingerprint is None or _recompute_latest_fingerprint(
+                    source,
+                    event_type,
+                ):
                     latest_fingerprint = _fingerprint_from_payload_json(
                         source=source,
                         event_type=event_type,
