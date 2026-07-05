@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from . import db, timeline
+from . import torrents as torrent_projection
 from .collectors import (
     cleanup as cleanup_collector,
     decision as decision_collector,
@@ -263,7 +264,17 @@ app = FastAPI(title="Handoffarr", lifespan=lifespan)
 @app.get("/api/health")
 async def health() -> JSONResponse:
     config = get_config()
-    return JSONResponse({"status": "ok", "config_present": config.is_present})
+    torrent_status = torrent_projection.torrent_response(
+        db.all_qbittorrent_torrents()
+    )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "config_present": config.is_present,
+            **torrent_status["summary"],
+            "dead_torrents_health": torrent_status["health"],
+        }
+    )
 
 
 @app.get("/timeline", response_class=HTMLResponse)
@@ -633,6 +644,82 @@ async def api_poll_now() -> JSONResponse:
     async with _poll_lock:
         results = await asyncio.to_thread(poll_once)
     return JSONResponse({"status": "ok", "results": results})
+
+
+@app.get("/api/torrents")
+async def api_torrents() -> JSONResponse:
+    return JSONResponse(
+        torrent_projection.torrent_response(db.all_qbittorrent_torrents())
+    )
+
+
+@app.post("/api/torrents/remove-dead")
+async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
+    raw_hashes = payload.get("hashes")
+    if not isinstance(raw_hashes, list):
+        return JSONResponse({"error": "hashes must be a list"}, status_code=422)
+    hashes = list(
+        dict.fromkeys(
+            str(value or "").strip().lower()
+            for value in raw_hashes
+            if str(value or "").strip()
+        )
+    )
+    current = {
+        str(torrent.get("hash") or "").lower(): torrent
+        for torrent in db.all_qbittorrent_torrents()
+    }
+    invalid = [
+        torrent_hash
+        for torrent_hash in hashes
+        if not current.get(torrent_hash, {}).get("dead_torrent")
+    ]
+    if not hashes or invalid:
+        return JSONResponse(
+            {
+                "error": "only currently detected dead torrents may be removed",
+                "invalid_hashes": invalid,
+            },
+            status_code=400,
+        )
+
+    result = await asyncio.to_thread(
+        qbittorrent.delete_torrents, get_config(), hashes, delete_files=False
+    )
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=502)
+    db.remove_qbittorrent_torrents(hashes)
+    return JSONResponse(
+        {
+            "ok": True,
+            "removed": len(hashes),
+            "hashes": hashes,
+            "delete_files": False,
+        }
+    )
+
+
+@app.post("/api/torrents/retry-dead")
+async def api_retry_dead_torrents(payload: dict) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": (
+                "Automatic failed-download/blocklist and search integration "
+                "is not available."
+            )
+        },
+        status_code=501,
+    )
+
+
+@app.get("/api/torrents/{torrent_hash}")
+async def api_torrent(torrent_hash: str) -> JSONResponse:
+    torrent = torrent_projection.torrent_detail(
+        torrent_hash, db.all_qbittorrent_torrents()
+    )
+    if torrent is None:
+        return JSONResponse({"error": "torrent not found"}, status_code=404)
+    return JSONResponse(torrent)
 
 
 # --- Debug inspection endpoints (read-only) -------------------------------

@@ -6,6 +6,8 @@ import { formatBytes } from "@/lib/formatBytes";
 import type { StorageResponse } from "@/api/storageApi";
 import type { ImportsResponse, ImportEvent } from "@/api/importsApi";
 import type { ValidationResponse } from "@/api/validationApi";
+import type { TorrentsResponse } from "@/api/torrentsApi";
+import { Link } from "react-router-dom";
 
 interface StatTileRowProps {
   storage: {
@@ -23,6 +25,11 @@ interface StatTileRowProps {
     isLoading: boolean;
     isError: boolean;
   };
+  torrents: {
+    data: TorrentsResponse | undefined;
+    isLoading: boolean;
+    isError: boolean;
+  };
 }
 
 function importsThisWeek(events: ImportEvent[] | undefined): number {
@@ -36,13 +43,36 @@ function importsThisWeek(events: ImportEvent[] | undefined): number {
   return count;
 }
 
-export function StatTileRow({ storage, imports, validation }: StatTileRowProps) {
+export function StatTileRow({ storage, imports, validation, torrents }: StatTileRowProps) {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
       <StorageTile state={storage} />
       <ActivityTile state={imports} />
+      <DeadDownloadsTile state={torrents} />
       <HealthTile state={validation} />
     </div>
+  );
+}
+
+function DeadDownloadsTile({
+  state,
+}: {
+  state: StatTileRowProps["torrents"];
+}) {
+  if (state.isLoading) return <TileSkeleton label="Dead Downloads" />;
+  if (state.isError || !state.data) return <TileError label="Dead Downloads" />;
+  const count = state.data.summary.dead_torrents;
+  return (
+    <Link
+      to="/torrents?status=dead"
+      className="rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      <StatTile
+        label="Dead Downloads"
+        value={String(count)}
+        supporting="No seeders available"
+      />
+    </Link>
   );
 }
 

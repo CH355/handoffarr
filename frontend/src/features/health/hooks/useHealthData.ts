@@ -3,6 +3,7 @@ import { getValidation } from "@/api/validationApi";
 import { getStorage } from "@/api/storageApi";
 import { listImports } from "@/api/importsApi";
 import { getQbitProbe, getRadarrProbe, getSeerrProbe } from "@/api/healthApi";
+import { listTorrents } from "@/api/torrentsApi";
 import { useRefreshQueryOptions } from "@/hooks/useRefreshQueryOptions";
 
 /* Health server-state composition. Each probe owns its loading/error so the
@@ -44,6 +45,11 @@ export function useHealthData() {
     ...heavy,
     retry: 0,
   });
+  const torrents = useQuery({
+    queryKey: ["torrents"],
+    queryFn: listTorrents,
+    ...medium,
+  });
 
-  return { validation, storage, imports, qbit, radarr, seerr };
+  return { validation, storage, imports, qbit, radarr, seerr, torrents };
 }

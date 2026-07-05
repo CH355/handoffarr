@@ -9,6 +9,7 @@ import { formatRelativeTime } from "@/lib/formatRelativeTime";
 import { useHomeData } from "./hooks/useHomeData";
 import type { CleanupResponse, CleanupCandidate } from "@/api/cleanupApi";
 import type { ValidationResponse } from "@/api/validationApi";
+import type { TorrentsResponse } from "@/api/torrentsApi";
 import { AuditProfiler, measureSync, useRouteAudit } from "@/perf/audit";
 
 type BannerVariant = "critical" | "recover" | "stuck" | "idle";
@@ -26,7 +27,19 @@ interface BannerData {
 function deriveBanner(
   cleanup: CleanupResponse | undefined,
   validation: ValidationResponse | undefined,
+  torrents: TorrentsResponse | undefined,
 ): BannerData {
+  if ((torrents?.summary.dead_torrents ?? 0) > 0) {
+    const count = torrents?.summary.dead_torrents ?? 0;
+    return {
+      variant: "stuck",
+      headline: "Some downloads cannot complete because no seeders exist.",
+      subline: `${count} dead torrent${count === 1 ? "" : "s"} detected`,
+      actionLabel: "Review Dead Torrents",
+      actionTo: "/torrents?status=dead",
+    };
+  }
+
   if (validation?.status === "FAIL") {
     const failing = validation.checks.find((c) => c.status === "FAIL");
     return {
@@ -78,12 +91,13 @@ function lastCleanupTimestamp(cleanup: CleanupResponse | undefined): string | nu
 }
 
 export function HomePage() {
-  const { cleanup, validation, storage, imports } = useHomeData();
+  const { cleanup, validation, storage, imports, torrents } = useHomeData();
   const dataReady =
     !cleanup.isLoading &&
     !validation.isLoading &&
     !storage.isLoading &&
-    !imports.isLoading;
+    !imports.isLoading &&
+    !torrents.isLoading;
   useRouteAudit("Home", dataReady, {
     cleanup_status: cleanup.status,
     validation_status: validation.status,
@@ -94,12 +108,13 @@ export function HomePage() {
   const banner = useMemo(
     () =>
       measureSync("transform", "Home.deriveBanner", () =>
-        deriveBanner(cleanup.data, validation.data),
+        deriveBanner(cleanup.data, validation.data, torrents.data),
       ),
-    [cleanup.data, validation.data],
+    [cleanup.data, validation.data, torrents.data],
   );
 
-  const bannerLoading = cleanup.isLoading || validation.isLoading;
+  const bannerLoading =
+    cleanup.isLoading || validation.isLoading || torrents.isLoading;
   const bannerError =
     cleanup.isError && validation.isError && !cleanup.data && !validation.data;
 
@@ -146,6 +161,11 @@ export function HomePage() {
             data: validation.data,
             isLoading: validation.isLoading,
             isError: validation.isError,
+          }}
+          torrents={{
+            data: torrents.data,
+            isLoading: torrents.isLoading,
+            isError: torrents.isError,
           }}
         />
       </AuditProfiler>

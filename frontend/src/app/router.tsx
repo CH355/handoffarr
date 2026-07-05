@@ -12,6 +12,8 @@ import { ItemDetailSurface } from "@/features/itemDetail/ItemDetailSurface";
 import { HealthPage } from "@/features/health/HealthPage";
 import { IntegrationDetailPage } from "@/features/health/IntegrationDetailPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
+import { TorrentDetailPage } from "@/features/torrents/TorrentDetailPage";
+import { TorrentsPage } from "@/features/torrents/TorrentsPage";
 import { AuditProfiler } from "@/perf/audit";
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
@@ -32,6 +34,11 @@ export const router = createBrowserRouter([
         path: "library",
         element: <AuditProfiler id="route:Library"><LibraryPage /></AuditProfiler>,
         children: [{ path: ":mediaId", element: <AuditProfiler id="route:ItemDetail"><ItemDetailSurface /></AuditProfiler> }],
+      },
+      {
+        path: "torrents",
+        element: <AuditProfiler id="route:Torrents"><TorrentsPage /></AuditProfiler>,
+        children: [{ path: ":torrentHash", element: <TorrentDetailPage /> }],
       },
       { path: "health", element: <AuditProfiler id="route:Health"><HealthPage /></AuditProfiler> },
       {

@@ -10,19 +10,21 @@ import { ValidationStatusCard } from "./components/ValidationStatusCard";
 import { IntegrationStatusList } from "./components/IntegrationStatusList";
 import { StorageStatusCard } from "./components/StorageStatusCard";
 import { RecentIssuesCard } from "./components/RecentIssuesCard";
+import { DeadTorrentsCard } from "./components/DeadTorrentsCard";
 import { AuditProfiler, measureSync, useRouteAudit } from "@/perf/audit";
 
 /* Sprint 5 Health screen. Monitoring + visibility only — no mutation
    buttons. State handling is per-card; no full-page spinner. */
 export function HealthPage() {
-  const { validation, storage, imports, qbit, radarr, seerr } = useHealthData();
+  const { validation, storage, imports, qbit, radarr, seerr, torrents } = useHealthData();
   const dataReady =
     !validation.isLoading &&
     !storage.isLoading &&
     !imports.isLoading &&
     !qbit.isLoading &&
     !radarr.isLoading &&
-    !seerr.isLoading;
+    !seerr.isLoading &&
+    !torrents.isLoading;
   useRouteAudit("Health", dataReady, {
     validation_status: validation.status,
     storage_status: storage.status,
@@ -111,6 +113,14 @@ export function HealthPage() {
           data={storage.data}
           isLoading={storage.isLoading}
           isError={storage.isError}
+        />
+      </AuditProfiler>
+
+      <AuditProfiler id="Health.DeadTorrentsCard">
+        <DeadTorrentsCard
+          data={torrents.data}
+          isLoading={torrents.isLoading}
+          isError={torrents.isError}
         />
       </AuditProfiler>
 

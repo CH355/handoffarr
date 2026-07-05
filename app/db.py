@@ -218,6 +218,12 @@ def init_db() -> None:
                 updated_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS qbittorrent_torrents (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
@@ -997,6 +1003,74 @@ def latest_events_for_source_since_by_hash(source: str, since_iso: str) -> list[
             (source, since_iso),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def replace_qbittorrent_torrents(torrents: list[dict[str, Any]]) -> None:
+    """Atomically replace the current qBittorrent snapshot."""
+    observed_at = _utcnow()
+    with _lock, _connect() as conn:
+        previous = {
+            row["torrent_hash"]: json.loads(row["payload_json"])
+            for row in conn.execute(
+                "SELECT torrent_hash, payload_json FROM qbittorrent_torrents"
+            ).fetchall()
+        }
+        conn.execute("DELETE FROM qbittorrent_torrents")
+        rows: list[tuple[str, str, str]] = []
+        for torrent in torrents:
+            torrent_hash = str(torrent.get("hash") or "").strip().lower()
+            if not torrent_hash:
+                continue
+            payload = dict(torrent)
+            prior = previous.get(torrent_hash, {})
+            if payload.get("dead_torrent"):
+                payload["dead_since"] = (
+                    prior.get("dead_since") if prior.get("dead_torrent") else observed_at
+                )
+            else:
+                payload["dead_since"] = None
+            rows.append(
+                (torrent_hash, json.dumps(payload, default=str), observed_at)
+            )
+        conn.executemany(
+            """
+            INSERT INTO qbittorrent_torrents
+                (torrent_hash, payload_json, observed_at)
+            VALUES (?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def all_qbittorrent_torrents() -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT payload_json, observed_at FROM qbittorrent_torrents "
+            "ORDER BY observed_at DESC, torrent_hash"
+        ).fetchall()
+    torrents = []
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        payload["observed_at"] = row["observed_at"]
+        torrents.append(payload)
+    return torrents
+
+
+def remove_qbittorrent_torrents(torrent_hashes: list[str]) -> None:
+    hashes = [
+        str(value).strip().lower()
+        for value in torrent_hashes
+        if str(value).strip()
+    ]
+    if not hashes:
+        return
+    placeholders = ",".join("?" for _ in hashes)
+    with _lock, _connect() as conn:
+        conn.execute(
+            f"DELETE FROM qbittorrent_torrents "
+            f"WHERE torrent_hash IN ({placeholders})",
+            hashes,
+        )
 
 
 def replace_traces(traces: list[dict[str, Any]]) -> None:

@@ -29,6 +29,9 @@ PROPERTIES_ENDPOINT = "/api/v2/torrents/properties"
 PEERS_ENDPOINT = "/api/v2/sync/torrentPeers"
 FILES_ENDPOINT = "/api/v2/torrents/files"
 DELETE_ENDPOINT = "/api/v2/torrents/delete"
+DEAD_REASON = "No seeders available. Torrent cannot currently download."
+DEAD_TORRENT_STATES = {"stalleddl", "queueddl", "downloading", "metadl"}
+AVAILABILITY_EPSILON = 0.0001
 
 # Disk-space thresholds (bytes) for the free-space finding, when detectable.
 DISK_CRITICAL_BYTES = 512 * 1024 * 1024  # 512 MiB
@@ -74,18 +77,54 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _to_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_dead_torrent(torrent: dict[str, Any]) -> bool:
+    """Detect a zero-piece download with no available source in the swarm."""
+    progress = _to_float(torrent.get("progress"))
+    availability = _to_float(torrent.get("availability"))
+    num_seeds = _to_int(torrent.get("num_seeds"))
+    num_complete = _to_int(torrent.get("num_complete"))
+    state = str(torrent.get("state") or "").lower()
+
+    # Availability is direct evidence that pieces exist. Seed counters are only
+    # a fallback for older qBittorrent responses that omit availability.
+    no_available_source = (
+        availability <= AVAILABILITY_EPSILON
+        if availability is not None
+        else num_seeds == 0 and num_complete == 0
+    )
+    return (
+        progress == 0
+        and no_available_source
+        and state in DEAD_TORRENT_STATES
+        and not state.startswith(("paused", "stopped"))
+    )
+
+
 def _normalize_torrent(t: dict[str, Any]) -> dict[str, Any]:
     """Project a raw qBittorrent torrent dict into our normalized shape."""
+    dead_torrent = is_dead_torrent(t)
     return {
         "hash": t.get("hash"),
         "name": t.get("name"),
         "state": t.get("state"),
         "num_seeds": _to_int(t.get("num_seeds")),
+        "num_complete": _to_int(t.get("num_complete")),
         "num_leechs": _to_int(t.get("num_leechs")),
         "seeds": _to_int(t.get("num_complete")),
         "peers": _to_int(t.get("num_incomplete")),
         "dlspeed": _to_int(t.get("dlspeed")),
         "progress": t.get("progress"),
+        "dead_torrent": dead_torrent,
+        "dead_reason": DEAD_REASON if dead_torrent else "",
     }
 
 
@@ -224,6 +263,56 @@ def delete_torrent_with_files(config: Config, torrent_hash: str) -> dict[str, An
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def delete_torrents(
+    config: Config, torrent_hashes: list[str], *, delete_files: bool = False
+) -> dict[str, Any]:
+    """Remove torrents in one qBittorrent call, preserving data by default."""
+    if not config.service_enabled(SOURCE):
+        return {"ok": False, "error": "service disabled or not configured"}
+
+    hashes = list(
+        dict.fromkeys(
+            str(value or "").strip().lower()
+            for value in torrent_hashes
+            if str(value or "").strip()
+        )
+    )
+    if not hashes:
+        return {"ok": False, "error": "no torrent hashes supplied"}
+
+    svc = config.service(SOURCE)
+    base_url = str(svc.get("base_url", "")).rstrip("/")
+    username = svc.get("username", "")
+    password = svc.get("password", "")
+    delete_endpoint = svc.get("delete_endpoint", DELETE_ENDPOINT)
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            if not _login(client, base_url, username, password):
+                return {"ok": False, "error": "login failed"}
+            response = client.post(
+                f"{base_url}{delete_endpoint}",
+                data={
+                    "hashes": "|".join(hashes),
+                    "deleteFiles": "true" if delete_files else "false",
+                },
+            )
+            if response.status_code >= 400:
+                return {
+                    "ok": False,
+                    "status_code": response.status_code,
+                    "error": response.text.strip(),
+                }
+            return {
+                "ok": True,
+                "status_code": response.status_code,
+                "hashes": hashes,
+                "deleteFiles": delete_files,
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def collect(config: Config) -> int:
     """Poll qBittorrent torrents. Returns the number of events stored."""
     if not config.service_enabled(SOURCE):
@@ -250,6 +339,10 @@ def collect(config: Config) -> int:
             if not isinstance(torrents, list):
                 logger.warning("Unexpected qBittorrent torrents payload shape")
                 return 0
+
+            db.replace_qbittorrent_torrents(
+                [_normalize_torrent_full(t) for t in torrents if isinstance(t, dict)]
+            )
 
             for t in torrents:
                 if not isinstance(t, dict):

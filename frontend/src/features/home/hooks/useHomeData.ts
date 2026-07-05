@@ -3,6 +3,7 @@ import { getCleanupSummary } from "@/api/cleanupApi";
 import { getValidation } from "@/api/validationApi";
 import { getStorage } from "@/api/storageApi";
 import { listImports } from "@/api/importsApi";
+import { listTorrents } from "@/api/torrentsApi";
 import { useRefreshQueryOptions } from "@/hooks/useRefreshQueryOptions";
 
 /* Home server-state composition per frontend-implementation-spec-v1.md §7.2.
@@ -30,6 +31,11 @@ export function useHomeData() {
     queryFn: listImports,
     ...medium,
   });
+  const torrents = useQuery({
+    queryKey: ["torrents"],
+    queryFn: listTorrents,
+    ...medium,
+  });
 
-  return { cleanup, validation, storage, imports };
+  return { cleanup, validation, storage, imports, torrents };
 }
