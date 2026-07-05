@@ -7,6 +7,8 @@ export type ExecutionStatus =
   | "idle"
   | "confirming"
   | "executing"
+  | "queued"
+  | "running"
   | "succeeded"
   | "partial-fail"
   | "total-fail";
@@ -17,6 +19,8 @@ export interface ExecutionState {
   completedCount?: number;
   failedCount?: number;
   recoveredBytes?: number;
+  batchId?: string | undefined;
+  backendStatus?: string | undefined;
 }
 
 export type ExecutionAction =
@@ -25,8 +29,16 @@ export type ExecutionAction =
   | { type: "start" }
   | {
       type: "success";
-      payload: { completedCount: number; failedCount: number; recoveredBytes: number };
+      payload: {
+        completedCount: number;
+        failedCount: number;
+        recoveredBytes: number;
+        batchId?: string | undefined;
+        backendStatus?: string | undefined;
+      };
     }
+  | { type: "queued"; payload: { batchId?: string | undefined; backendStatus?: string | undefined } }
+  | { type: "running"; payload: { batchId?: string | undefined; backendStatus?: string | undefined } }
   | { type: "fail"; payload: { message: string } }
   | { type: "reset" };
 
@@ -43,10 +55,25 @@ export function executionReducer(
       return { status: "idle" };
     case "start":
       return { ...state, status: "executing" };
+    case "queued":
+      return {
+        ...state,
+        status: "queued",
+        batchId: action.payload.batchId,
+        backendStatus: action.payload.backendStatus,
+      };
+    case "running":
+      return {
+        ...state,
+        status: "running",
+        batchId: action.payload.batchId,
+        backendStatus: action.payload.backendStatus,
+      };
     case "success": {
-      const { completedCount, failedCount, recoveredBytes } = action.payload;
+      const { completedCount, failedCount, recoveredBytes, batchId, backendStatus } =
+        action.payload;
       const status: ExecutionStatus = failedCount > 0 ? "partial-fail" : "succeeded";
-      return { status, completedCount, failedCount, recoveredBytes };
+      return { status, completedCount, failedCount, recoveredBytes, batchId, backendStatus };
     }
     case "fail":
       return { status: "total-fail", errorMessage: action.payload.message };

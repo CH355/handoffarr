@@ -4,6 +4,7 @@ import { IntegrationSettingsCard } from "./components/IntegrationSettingsCard";
 import { CleanupSettingsCard } from "./components/CleanupSettingsCard";
 import { RuntimeSettingsCard } from "./components/RuntimeSettingsCard";
 import { AboutCard } from "./components/AboutCard";
+import { AuditProfiler, useRouteAudit } from "@/perf/audit";
 
 /* Sprint 6 Settings page.
 
@@ -14,6 +15,21 @@ import { AboutCard } from "./components/AboutCard";
    independently per frontend-implementation-spec-v1.md §7.2. */
 export function SettingsPage() {
   const { health, qbit, radarr, seerr, storage, executions } = useSettingsData();
+  const dataReady =
+    !health.isLoading &&
+    !qbit.isLoading &&
+    !radarr.isLoading &&
+    !seerr.isLoading &&
+    !storage.isLoading &&
+    !executions.isLoading;
+  useRouteAudit("Settings", dataReady, {
+    health_status: health.status,
+    qbit_status: qbit.status,
+    radarr_status: radarr.status,
+    seerr_status: seerr.status,
+    storage_status: storage.status,
+    executions_status: executions.status,
+  });
 
   return (
     <section
@@ -30,51 +46,61 @@ export function SettingsPage() {
         </p>
       </header>
 
-      <GeneralSettingsCard
-        health={health.data}
-        isLoading={health.isLoading}
-        isError={health.isError}
-      />
+      <AuditProfiler id="Settings.GeneralSettingsCard">
+        <GeneralSettingsCard
+          health={health.data}
+          isLoading={health.isLoading}
+          isError={health.isError}
+        />
+      </AuditProfiler>
 
-      <IntegrationSettingsCard
-        rows={[
-          {
-            id: "qbittorrent",
-            name: "qBittorrent",
-            probe: qbit.data,
-            isLoading: qbit.isLoading,
-            isError: qbit.isError,
-          },
-          {
-            id: "radarr",
-            name: "Radarr",
-            probe: radarr.data,
-            isLoading: radarr.isLoading,
-            isError: radarr.isError,
-          },
-          {
-            id: "seerr",
-            name: "Overseerr",
-            probe: seerr.data,
-            isLoading: seerr.isLoading,
-            isError: seerr.isError,
-          },
-        ]}
-      />
+      <AuditProfiler id="Settings.IntegrationSettingsCard">
+        <IntegrationSettingsCard
+          rows={[
+            {
+              id: "qbittorrent",
+              name: "qBittorrent",
+              probe: qbit.data,
+              isLoading: qbit.isLoading,
+              isError: qbit.isError,
+            },
+            {
+              id: "radarr",
+              name: "Radarr",
+              probe: radarr.data,
+              isLoading: radarr.isLoading,
+              isError: radarr.isError,
+            },
+            {
+              id: "seerr",
+              name: "Overseerr",
+              probe: seerr.data,
+              isLoading: seerr.isLoading,
+              isError: seerr.isError,
+            },
+          ]}
+        />
+      </AuditProfiler>
 
-      <CleanupSettingsCard
-        config={executions.data?.config}
-        isLoading={executions.isLoading}
-        isError={executions.isError}
-      />
+      <AuditProfiler id="Settings.CleanupSettingsCard">
+        <CleanupSettingsCard
+          config={executions.data?.config}
+          isLoading={executions.isLoading}
+          isError={executions.isError}
+        />
+      </AuditProfiler>
 
-      <RuntimeSettingsCard
-        storage={storage.data}
-        isLoading={storage.isLoading}
-        isError={storage.isError}
-      />
+      <AuditProfiler id="Settings.RuntimeSettingsCard">
+        <RuntimeSettingsCard
+          storage={storage.data}
+          isLoading={storage.isLoading}
+          isError={storage.isError}
+        />
+      </AuditProfiler>
 
-      <AboutCard />
+      <AuditProfiler id="Settings.AboutCard">
+        <AboutCard />
+      </AuditProfiler>
     </section>
   );
 }

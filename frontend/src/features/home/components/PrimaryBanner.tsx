@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { AlertOctagon, CheckCircle2 } from "lucide-react";
+import { AlertOctagon, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 type BannerVariant = "critical" | "recover" | "stuck" | "idle";
@@ -38,6 +38,12 @@ export function PrimaryBanner({
           <AlertOctagon
             size={20}
             className="mt-2 shrink-0 text-critical"
+            aria-hidden="true"
+          />
+        ) : variant === "stuck" ? (
+          <AlertTriangle
+            size={20}
+            className="mt-2 shrink-0 text-caution"
             aria-hidden="true"
           />
         ) : variant === "idle" ? (

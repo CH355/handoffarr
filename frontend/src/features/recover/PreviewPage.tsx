@@ -18,6 +18,7 @@ import {
   executionReducer,
   initialExecutionState,
 } from "./reducers/executionReducer";
+import { useCleanupBatchDetailQuery } from "./hooks/useCleanupReview";
 
 /* PreviewPage — Blueprint §4 v1.1 M3. Full-screen (not modal) dry-run preview.
    Pipeline: read selection → batch dry-run → InlineConfirmationStrip (phrase
@@ -31,6 +32,7 @@ export function PreviewPage() {
   const [dryRun, setDryRun] = useState<CleanupBatchDryRunResult | null>(null);
   const [dryRunError, setDryRunError] = useState<string | null>(null);
   const [state, dispatch] = useReducer(executionReducer, initialExecutionState);
+  const submittedBatch = useCleanupBatchDetailQuery(state.batchId);
 
   useEffect(() => {
     const raw = sessionStorage.getItem("recover.batchSelection");
@@ -82,6 +84,20 @@ export function PreviewPage() {
       dispatch({ type: "start" });
     },
     onSuccess: (data) => {
+      const status = String(data.batch_status ?? data.status ?? "");
+      const batchId = typeof data.batch_id === "string" ? data.batch_id : dryRun?.plan_id ?? undefined;
+      if (status === "Queued") {
+        dispatch({ type: "queued", payload: { batchId, backendStatus: status } });
+        queryClient.invalidateQueries({ queryKey: ["cleanup", "executions"] });
+        sessionStorage.removeItem("recover.batchSelection");
+        return;
+      }
+      if (status === "Running") {
+        dispatch({ type: "running", payload: { batchId, backendStatus: status } });
+        queryClient.invalidateQueries({ queryKey: ["cleanup", "executions"] });
+        sessionStorage.removeItem("recover.batchSelection");
+        return;
+      }
       const completed = Number(data.completed_count ?? 0);
       const failed = Number(data.failed_count ?? 0);
       const recovered = Number(data.actual_recovered_bytes ?? 0);
@@ -91,6 +107,8 @@ export function PreviewPage() {
           completedCount: completed,
           failedCount: failed,
           recoveredBytes: recovered,
+          batchId,
+          backendStatus: status,
         },
       });
       queryClient.invalidateQueries({ queryKey: ["cleanup"] });
@@ -103,6 +121,36 @@ export function PreviewPage() {
       dispatch({ type: "fail", payload: { message: err.message } });
     },
   });
+
+  useEffect(() => {
+    const detail = submittedBatch.data;
+    if (!detail || !state.batchId) return;
+    const status = String(detail.status ?? "");
+    if (status === "Queued") {
+      dispatch({ type: "queued", payload: { batchId: state.batchId, backendStatus: status } });
+      return;
+    }
+    if (status === "Running") {
+      dispatch({ type: "running", payload: { batchId: state.batchId, backendStatus: status } });
+      return;
+    }
+    if (status === "Completed" || status === "Partially Completed" || status === "Failed") {
+      dispatch({
+        type: "success",
+        payload: {
+          completedCount: Number(detail.completed_count ?? 0),
+          failedCount: Number(detail.failed_count ?? (status === "Failed" ? 1 : 0)),
+          recoveredBytes: Number(detail.actual_recovered_bytes ?? 0),
+          batchId: state.batchId,
+          backendStatus: status,
+        },
+      });
+      queryClient.invalidateQueries({ queryKey: ["cleanup"] });
+      queryClient.invalidateQueries({ queryKey: ["cleanup", "executions"] });
+      queryClient.invalidateQueries({ queryKey: ["storage"] });
+      queryClient.invalidateQueries({ queryKey: ["validation"] });
+    }
+  }, [queryClient, state.batchId, submittedBatch.data]);
 
   if (!selection) return <LoadingState label="Loading preview" rows={3} />;
 
@@ -191,6 +239,23 @@ export function PreviewPage() {
                 Done
               </button>
             </>
+          }
+        />
+      ) : null}
+
+      {dryRun && (state.status === "queued" || state.status === "running") ? (
+        <SuccessStateBanner
+          variant="success"
+          title={`Cleanup ${state.backendStatus ?? state.status}`}
+          description="The backend accepted the request and is executing it in the background."
+          meta={state.batchId ? `Batch ${state.batchId}` : undefined}
+          actions={
+            <Link
+              to="/recover/history"
+              className="rounded-md bg-accent px-3 py-1.5 text-body font-medium text-accent-on hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              View history
+            </Link>
           }
         />
       ) : null}

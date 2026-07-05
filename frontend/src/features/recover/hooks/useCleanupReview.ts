@@ -3,6 +3,7 @@ import {
   getCleanupReview,
   getCleanupSummary,
   getCleanupExecutions,
+  getCleanupExecutionBatchDetail,
   type CleanupReviewFilters,
 } from "@/api/cleanupApi";
 
@@ -31,5 +32,27 @@ export function useCleanupExecutionsQuery(limit = 100) {
     queryFn: () => getCleanupExecutions(limit),
     staleTime: 0,
     refetchOnWindowFocus: true,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActive =
+        data?.executions.some((e) =>
+          ["Queued", "Running"].includes(String(e.execution_status ?? "")),
+        ) ||
+        data?.batches.some((b) => ["Queued", "Running"].includes(String(b.status ?? "")));
+      return hasActive ? 2_000 : false;
+    },
+  });
+}
+
+export function useCleanupBatchDetailQuery(batchId: string | undefined) {
+  return useQuery({
+    queryKey: ["cleanup", "execution-batches", batchId],
+    queryFn: () => getCleanupExecutionBatchDetail(batchId ?? ""),
+    enabled: Boolean(batchId),
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const status = String(query.state.data?.status ?? "");
+      return ["Queued", "Running"].includes(status) ? 2_000 : false;
+    },
   });
 }

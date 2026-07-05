@@ -15,6 +15,7 @@ from typing import Any
 from . import db, states
 from .config import Config
 from .imports import IMPORT_SUCCESS
+from .perf import timed, trace
 
 LIBRARY_PRESENT = "Library Present"
 LIBRARY_MISSING = "Library Missing"
@@ -205,52 +206,72 @@ def enrich_library_artifacts(
     since = (
         datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
     ).isoformat()
-    imports_by_media = {
-        str(event.get("media_id")): event for event in db.all_import_events()
-    }
-    qbit_events = _latest_by(
-        db.events_for_source_since("qbittorrent", since),
-        lambda e: e.get("torrent_hash"),
-    )
+    with timed("library_enrichment_import_read", artifacts=len(artifacts)):
+        import_events = db.all_import_events()
+    imports_by_media = {str(event.get("media_id")): event for event in import_events}
+    with timed("library_enrichment_qbit_read", artifacts=len(artifacts)):
+        qbit_raw_events = db.events_for_source_since("qbittorrent", since)
+    with timed(
+        "library_enrichment_qbit_latest",
+        qbit_raw_events=len(qbit_raw_events),
+    ):
+        qbit_events = _latest_by(
+            qbit_raw_events,
+            lambda e: e.get("torrent_hash"),
+        )
 
     enriched: list[dict[str, Any]] = []
-    for artifact in artifacts:
-        item = dict(artifact)
-        import_event = imports_by_media.get(str(item.get("media_id")))
-        status = _status_for_artifact(item, import_event)
-        download_present, download_evidence = _download_copy_present(
-            item, import_event, qbit_events
-        )
-        import_success = bool(
-            import_event and import_event.get("import_status") == IMPORT_SUCCESS
-        )
-        item["library_status"] = status
-        item["download_copy_present"] = download_present
-        item["potential_cleanup_candidate"] = (
-            import_success and status == LIBRARY_PRESENT and download_present
-        )
-        item["import_status"] = import_event.get("import_status") if import_event else None
-        item["paths"] = {
-            "library_path": item.get("library_path"),
-            "download_path": download_evidence.get("save_path"),
-        }
-        evidence = dict(item.get("evidence") or {})
-        if import_event:
-            evidence["import"] = {
-                "import_id": import_event.get("import_id"),
-                "import_status": import_event.get("import_status"),
-                "message": "Import event observed.",
+    with timed(
+        "library_enrichment_transform",
+        artifacts=len(artifacts),
+        import_events=len(import_events),
+        qbit_events=len(qbit_events),
+    ):
+        for artifact in artifacts:
+            item = dict(artifact)
+            import_event = imports_by_media.get(str(item.get("media_id")))
+            status = _status_for_artifact(item, import_event)
+            download_present, download_evidence = _download_copy_present(
+                item, import_event, qbit_events
+            )
+            import_success = bool(
+                import_event and import_event.get("import_status") == IMPORT_SUCCESS
+            )
+            item["library_status"] = status
+            item["download_copy_present"] = download_present
+            item["potential_cleanup_candidate"] = (
+                import_success and status == LIBRARY_PRESENT and download_present
+            )
+            item["import_status"] = import_event.get("import_status") if import_event else None
+            item["paths"] = {
+                "library_path": item.get("library_path"),
+                "download_path": download_evidence.get("save_path"),
             }
-        if status == LIBRARY_PRESENT:
-            evidence["library"] = "Library file verified."
-        elif status == LIBRARY_MISSING:
-            evidence["library"] = "Import event exists; expected library file not found."
-        else:
-            evidence["library"] = "Insufficient information to verify library file."
-        if download_evidence:
-            evidence["download_copy"] = download_evidence
-        item["evidence"] = evidence
-        enriched.append(item)
+            evidence = dict(item.get("evidence") or {})
+            if import_event:
+                evidence["import"] = {
+                    "import_id": import_event.get("import_id"),
+                    "import_status": import_event.get("import_status"),
+                    "message": "Import event observed.",
+                }
+            if status == LIBRARY_PRESENT:
+                evidence["library"] = "Library file verified."
+            elif status == LIBRARY_MISSING:
+                evidence["library"] = "Import event exists; expected library file not found."
+            else:
+                evidence["library"] = "Insufficient information to verify library file."
+            if download_evidence:
+                evidence["download_copy"] = download_evidence
+            item["evidence"] = evidence
+            enriched.append(item)
+    trace(
+        "library_enrichment",
+        artifacts=len(artifacts),
+        enriched=len(enriched),
+        import_events=len(import_events),
+        qbit_raw_events=len(qbit_raw_events),
+        qbit_latest_events=len(qbit_events),
+    )
     return enriched
 
 
@@ -271,23 +292,34 @@ def library_response(
     artifacts: list[dict[str, Any]],
     config: Config,
 ) -> dict[str, Any]:
-    enriched = enrich_library_artifacts(artifacts, config)
-    return {
-        "summary": summarize_library(enriched),
-        "present": [
-            item for item in enriched if item.get("library_status") == LIBRARY_PRESENT
-        ],
-        "missing": [
-            item for item in enriched if item.get("library_status") == LIBRARY_MISSING
-        ],
-        "unknown": [
-            item for item in enriched if item.get("library_status") == LIBRARY_UNKNOWN
-        ],
-        "potential_cleanup_candidates": [
-            item for item in enriched if item.get("potential_cleanup_candidate")
-        ],
-        "artifacts": enriched,
-    }
+    with timed("library_response_enrichment", artifacts=len(artifacts)):
+        enriched = enrich_library_artifacts(artifacts, config)
+    with timed("library_response_partition", enriched=len(enriched)):
+        response = {
+            "summary": summarize_library(enriched),
+            "present": [
+                item for item in enriched if item.get("library_status") == LIBRARY_PRESENT
+            ],
+            "missing": [
+                item for item in enriched if item.get("library_status") == LIBRARY_MISSING
+            ],
+            "unknown": [
+                item for item in enriched if item.get("library_status") == LIBRARY_UNKNOWN
+            ],
+            "potential_cleanup_candidates": [
+                item for item in enriched if item.get("potential_cleanup_candidate")
+            ],
+            "artifacts": enriched,
+        }
+    trace(
+        "library_response",
+        artifacts=len(enriched),
+        present=len(response["present"]),
+        missing=len(response["missing"]),
+        unknown=len(response["unknown"]),
+        cleanup_candidates=len(response["potential_cleanup_candidates"]),
+    )
+    return response
 
 
 def media_library_response(
@@ -295,9 +327,18 @@ def media_library_response(
     artifacts: list[dict[str, Any]],
     config: Config,
 ) -> dict[str, Any]:
-    enriched = enrich_library_artifacts(artifacts, config)
-    matching = [item for item in enriched if str(item.get("media_id")) == str(media_id)]
+    with timed("media_library_response_enrichment", media_id=media_id, artifacts=len(artifacts)):
+        enriched = enrich_library_artifacts(artifacts, config)
+    with timed("media_library_response_filter", media_id=media_id, enriched=len(enriched)):
+        matching = [item for item in enriched if str(item.get("media_id")) == str(media_id)]
     latest = matching[0] if matching else None
+    trace(
+        "media_library_response",
+        media_id=media_id,
+        input_artifacts=len(artifacts),
+        enriched=len(enriched),
+        matches=len(matching),
+    )
     return {
         "media_id": media_id,
         "library_artifact": latest,

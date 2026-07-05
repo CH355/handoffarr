@@ -4,6 +4,7 @@ import { getValidation } from "@/api/validationApi";
 import { getStorage } from "@/api/storageApi";
 import { listImports } from "@/api/importsApi";
 import { getStates } from "@/api/debugApi";
+import { listTorrents } from "@/api/torrentsApi";
 
 /* Home server-state composition per frontend-implementation-spec-v1.md §7.2.
    Each query owns its own loading/error so the page can degrade per-card. */
@@ -35,6 +36,11 @@ export function useHomeData() {
     staleTime: 0,
     retry: 0,
   });
+  const torrents = useQuery({
+    queryKey: ["torrents"],
+    queryFn: listTorrents,
+    staleTime: 30_000,
+  });
 
-  return { cleanup, validation, storage, imports, states };
+  return { cleanup, validation, storage, imports, states, torrents };
 }

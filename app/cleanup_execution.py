@@ -7,6 +7,8 @@ deleteFiles=true; Handoffarr never deletes filesystem paths directly.
 
 from __future__ import annotations
 
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
@@ -15,10 +17,16 @@ from . import db
 from .cleanup_review import SAFE_REVIEW, build_cleanup_review
 from .collectors import qbittorrent
 from .config import Config
+from .perf import timed
 
+logger = logging.getLogger("handoffarr.cleanup_execution")
+
+QUEUED = "Queued"
+RUNNING = "Running"
 COMPLETED = "Completed"
 FAILED = "Failed"
 BLOCKED = "Blocked"
+PARTIALLY_COMPLETED = "Partially Completed"
 DRY_RUN = "Dry Run"
 
 
@@ -228,6 +236,32 @@ def _log_execution(
         "completed_at": completed_at,
     }
     db.insert_cleanup_execution(row)
+
+
+def _execution_response(
+    *,
+    execution_id: str,
+    status: str,
+    precheck: dict[str, Any] | None = None,
+    qbit_result: dict[str, Any] | None = None,
+    postcheck: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate = (precheck or {}).get("candidate") or {}
+    return {
+        "execution_id": execution_id,
+        "execution_status": status,
+        "precheck_evidence": precheck or {},
+        "qbittorrent_api_result": qbit_result,
+        "postcheck_evidence": postcheck or {},
+        "qbittorrent_item_disappeared": bool((postcheck or {}).get("qbit_item_disappeared")),
+        "library_file_still_exists": (postcheck or {}).get("library_file_still_exists"),
+        "estimated_recoverable_bytes": candidate.get("recoverable_bytes"),
+        "actual_verification_status": (
+            "Queued for background execution."
+            if status == QUEUED
+            else ("Verified" if status == COMPLETED else status)
+        ),
+    }
 
 
 def dry_run(
@@ -450,7 +484,7 @@ def execute(
 
     _log_execution(
         execution_id=execution_id,
-        status="Started",
+        status=RUNNING,
         action="Execute",
         confirmation=confirmation,
         precheck=precheck,
@@ -632,3 +666,402 @@ def batch_execute(
         "per_item": per_item_results,
         "blocking_reasons": [],
     }
+
+
+def _batch_gate(
+    *,
+    plan_id: str,
+    confirmation: str,
+    config: Config,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[str]]:
+    cfg = _execution_config(config)
+    batch = db.cleanup_execution_batch(plan_id)
+    blocking: list[str] = []
+    if confirmation != "EXECUTE BATCH CLEANUP":
+        blocking.append("Confirmation phrase must be exactly 'EXECUTE BATCH CLEANUP'.")
+    if not cfg["enabled"]:
+        blocking.append("cleanup_execution.enabled is false.")
+    if not cfg["allow_batch_execution"]:
+        blocking.append("cleanup_execution.allow_batch_execution is false.")
+    if batch is None:
+        blocking.append("No successful batch dry-run plan exists for this plan_id.")
+
+    plan_items: list[dict[str, Any]] = []
+    if batch:
+        evidence = batch.get("evidence") or {}
+        if batch.get("status") not in {DRY_RUN, QUEUED, RUNNING} or not evidence.get("allowed"):
+            blocking.append("Batch plan is not a successful dry run.")
+        try:
+            created = datetime.fromisoformat(str(batch.get("created_at")))
+            age_seconds = (datetime.now(timezone.utc) - created).total_seconds()
+            if age_seconds > 1800:
+                blocking.append("Batch dry-run plan is older than 30 minutes.")
+        except (TypeError, ValueError):
+            blocking.append("Batch dry-run plan timestamp is invalid.")
+        plan_items = evidence.get("items") if isinstance(evidence.get("items"), list) else []
+        if len(plan_items) > cfg["max_batch_items"]:
+            blocking.append(
+                f"Batch plan contains {len(plan_items)} item(s); max_batch_items is {cfg['max_batch_items']}."
+            )
+    return batch, plan_items, blocking
+
+
+def submit_batch_execute(
+    *,
+    plan_id: str,
+    confirmation: str,
+    config: Config,
+) -> dict[str, Any]:
+    with timed("cleanup_execution_submission", kind="batch"):
+        batch, plan_items, blocking = _batch_gate(
+            plan_id=plan_id,
+            confirmation=confirmation,
+            config=config,
+        )
+        if blocking:
+            if batch:
+                db.update_cleanup_execution_batch(
+                    plan_id,
+                    {
+                        "status": BLOCKED,
+                        "completed_count": 0,
+                        "failed_count": 0,
+                        "actual_recovered_bytes": 0,
+                        "evidence": {
+                            **(batch.get("evidence") or {}),
+                            "execute_blocking_reasons": blocking,
+                        },
+                        "completed_at": _utcnow(),
+                        "transition_reason": "batch execute submission blocked",
+                    },
+                )
+            return {
+                "batch_id": plan_id,
+                "batch_status": BLOCKED,
+                "status": BLOCKED,
+                "completed_count": 0,
+                "failed_count": 0,
+                "total_recovered_bytes": 0,
+                "actual_recovered_bytes": 0,
+                "per_item": [],
+                "blocking_reasons": blocking,
+            }
+
+        assert batch is not None
+        db.update_cleanup_execution_batch(
+            plan_id,
+            {
+                "status": QUEUED,
+                "completed_count": 0,
+                "failed_count": 0,
+                "actual_recovered_bytes": 0,
+                "evidence": {
+                    **(batch.get("evidence") or {}),
+                    "execute_submission": {
+                        "confirmation": confirmation,
+                        "queued_at": _utcnow(),
+                    },
+                },
+                "completed_at": None,
+                "transition_reason": "batch execute submitted",
+            },
+        )
+    return {
+        "batch_id": plan_id,
+        "batch_status": QUEUED,
+        "status": QUEUED,
+        "item_count": len(plan_items),
+        "completed_count": 0,
+        "failed_count": 0,
+        "planned_recoverable_bytes": batch.get("planned_recoverable_bytes"),
+        "actual_recovered_bytes": 0,
+        "total_recovered_bytes": 0,
+        "per_item": [],
+        "blocking_reasons": [],
+    }
+
+
+def run_queued_batch(
+    batch: dict[str, Any],
+    *,
+    config: Config,
+    post_execute_poll: Callable[[], Any],
+) -> dict[str, Any]:
+    plan_id = str(batch.get("batch_id") or "")
+    evidence = batch.get("evidence") or {}
+    submission = evidence.get("execute_submission") or {}
+    confirmation = str(submission.get("confirmation") or "EXECUTE BATCH CLEANUP")
+    db.update_cleanup_execution_batch(
+        plan_id,
+        {
+            "status": RUNNING,
+            "completed_count": 0,
+            "failed_count": 0,
+            "actual_recovered_bytes": 0,
+            "completed_at": None,
+            "evidence": evidence,
+            "transition_reason": "background worker claimed batch",
+        },
+    )
+    with timed("background_execution_runtime", kind="batch", batch_id=plan_id):
+        current_batch, plan_items, blocking = _batch_gate(
+            plan_id=plan_id,
+            confirmation=confirmation,
+            config=config,
+        )
+        if blocking:
+            db.update_cleanup_execution_batch(
+                plan_id,
+                {
+                    "status": BLOCKED,
+                    "completed_count": 0,
+                    "failed_count": 0,
+                    "actual_recovered_bytes": 0,
+                    "evidence": {**evidence, "execute_blocking_reasons": blocking},
+                    "completed_at": _utcnow(),
+                    "transition_reason": "worker batch gate blocked",
+                },
+            )
+            return {
+                "batch_status": BLOCKED,
+                "plan_id": plan_id,
+                "completed_count": 0,
+                "failed_count": 0,
+                "total_recovered_bytes": 0,
+                "per_item": [],
+                "blocking_reasons": blocking,
+            }
+        completed = 0
+        failed = 0
+        recovered = 0
+        per_item_results: list[dict[str, Any]] = []
+        status = COMPLETED
+        for planned in plan_items:
+            media_id = str(planned.get("media_id") or "")
+            qbit_hash = str(planned.get("qbit_hash") or "").lower()
+            queued = submit_execute(
+                media_id=media_id,
+                qbit_hash=qbit_hash,
+                confirmation=f"DELETE SAFE CANDIDATE {media_id}",
+                cleanup_events=db.all_cleanup_events(),
+                import_events=db.all_import_events(),
+                library_artifacts=db.all_library_artifacts(),
+                traces=db.all_traces(),
+                config=config,
+                batch_id=plan_id,
+                bypass_single_gate=True,
+            )
+            execution = db.cleanup_execution(str(queued.get("execution_id") or ""))
+            result = (
+                run_queued_execution(
+                    execution,
+                    config=config,
+                    post_execute_poll=post_execute_poll,
+                )
+                if execution and execution.get("execution_status") == QUEUED
+                else queued
+            )
+            per_item_results.append(result)
+            if result.get("execution_status") == COMPLETED:
+                completed += 1
+                recovered += _to_int(result.get("estimated_recoverable_bytes"))
+                continue
+            failed += 1
+            status = PARTIALLY_COMPLETED if completed else FAILED
+            break
+
+        db.update_cleanup_execution_batch(
+            plan_id,
+            {
+                "status": status,
+                "completed_count": completed,
+                "failed_count": failed,
+                "actual_recovered_bytes": recovered,
+                "evidence": {
+                    **((current_batch or batch).get("evidence") or {}),
+                    "execution_results": per_item_results,
+                    "stopped_on_first_failure": failed > 0,
+                },
+                "completed_at": _utcnow(),
+                "transition_reason": "background worker completed batch",
+            },
+        )
+    logger.info("cleanup batch finished batch_id=%s status=%s", plan_id, status)
+    return {
+        "batch_status": status,
+        "plan_id": plan_id,
+        "completed_count": completed,
+        "failed_count": failed,
+        "total_recovered_bytes": recovered,
+        "per_item": per_item_results,
+        "blocking_reasons": [],
+    }
+
+
+def submit_execute(
+    *,
+    media_id: str,
+    qbit_hash: str,
+    confirmation: str,
+    cleanup_events: list[dict[str, Any]],
+    import_events: list[dict[str, Any]],
+    library_artifacts: list[dict[str, Any]],
+    traces: list[dict[str, Any]],
+    config: Config,
+    batch_id: str | None = None,
+    bypass_single_gate: bool = False,
+) -> dict[str, Any]:
+    execution_id = f"execute:{uuid4()}"
+    with timed("cleanup_execution_submission", kind="single"):
+        precheck = _precheck(
+            action="Execute",
+            media_id=media_id,
+            qbit_hash=qbit_hash,
+            confirmation=confirmation,
+            cleanup_events=cleanup_events,
+            import_events=import_events,
+            library_artifacts=library_artifacts,
+            traces=traces,
+            config=config,
+        )
+        cfg = precheck["config"]
+        gate_blocks = []
+        if not cfg["enabled"]:
+            gate_blocks.append("cleanup_execution.enabled is false.")
+        if not cfg["allow_single_item_execution"] and not bypass_single_gate:
+            gate_blocks.append("cleanup_execution.allow_single_item_execution is false.")
+        precheck["blocking_reasons"].extend(gate_blocks)
+        precheck["allowed"] = precheck["allowed"] and not gate_blocks
+
+        status = QUEUED if precheck["allowed"] else BLOCKED
+        _log_execution(
+            execution_id=execution_id,
+            status=status,
+            action="Execute",
+            confirmation=confirmation,
+            precheck=precheck,
+            batch_id=batch_id,
+            completed_at=_utcnow() if status == BLOCKED else None,
+            extra_evidence={
+                "submission": {
+                    "media_id": media_id,
+                    "qbit_hash": qbit_hash,
+                    "confirmation": confirmation,
+                    "bypass_single_gate": bypass_single_gate,
+                }
+            },
+        )
+    return _execution_response(execution_id=execution_id, status=status, precheck=precheck)
+
+
+def run_queued_execution(
+    execution: dict[str, Any],
+    *,
+    config: Config,
+    post_execute_poll: Callable[[], Any],
+) -> dict[str, Any]:
+    execution_id = str(execution.get("execution_id") or "")
+    evidence = execution.get("evidence") or {}
+    submission = evidence.get("submission") or {}
+    media_id = str(submission.get("media_id") or execution.get("media_id") or "")
+    qbit_hash = str(submission.get("qbit_hash") or execution.get("qbit_hash") or "").lower()
+    confirmation = str(
+        submission.get("confirmation")
+        or execution.get("confirmation_phrase")
+        or f"DELETE SAFE CANDIDATE {media_id}"
+    )
+    bypass_single_gate = bool(submission.get("bypass_single_gate"))
+
+    db.update_cleanup_execution(
+        execution_id,
+        {
+            "execution_status": RUNNING,
+            "blocking_reasons": [],
+            "evidence": evidence,
+            "completed_at": None,
+            "transition_reason": "background worker claimed execution",
+        },
+    )
+    with timed("background_execution_runtime", kind="single", execution_id=execution_id):
+        precheck = _precheck(
+            action="Execute",
+            media_id=media_id,
+            qbit_hash=qbit_hash,
+            confirmation=confirmation,
+            cleanup_events=db.all_cleanup_events(),
+            import_events=db.all_import_events(),
+            library_artifacts=db.all_library_artifacts(),
+            traces=db.all_traces(),
+            config=config,
+        )
+        cfg = precheck["config"]
+        gate_blocks = []
+        if not cfg["enabled"]:
+            gate_blocks.append("cleanup_execution.enabled is false.")
+        if not cfg["allow_single_item_execution"] and not bypass_single_gate:
+            gate_blocks.append("cleanup_execution.allow_single_item_execution is false.")
+        precheck["blocking_reasons"].extend(gate_blocks)
+        precheck["allowed"] = precheck["allowed"] and not gate_blocks
+
+        if not precheck["allowed"]:
+            db.update_cleanup_execution(
+                execution_id,
+                {
+                    "execution_status": BLOCKED,
+                    "blocking_reasons": precheck.get("blocking_reasons") or [],
+                    "evidence": {**evidence, "precheck": precheck},
+                    "completed_at": _utcnow(),
+                    "transition_reason": "worker precheck blocked",
+                },
+            )
+            return _execution_response(execution_id=execution_id, status=BLOCKED, precheck=precheck)
+
+        qbit_result = qbittorrent.delete_torrent_with_files(config, qbit_hash)
+        postcheck: dict[str, Any] = {}
+        try:
+            qbit_present, qbit_live = _live_torrent_present(config, qbit_hash)
+            candidate = precheck.get("candidate") or {}
+            paths = candidate.get("paths") or {}
+            library_path = paths.get("library_path")
+            library_file_still_exists = bool(
+                library_path and os.path.isfile(str(library_path))
+            )
+            postcheck = {
+                "qbit_live": qbit_live,
+                "qbit_item_disappeared": not qbit_present,
+                "library_file_still_exists": library_file_still_exists,
+                "library_path": library_path,
+            }
+        except Exception as exc:  # noqa: BLE001
+            postcheck = {"error": f"{type(exc).__name__}: {exc}"}
+
+        status = COMPLETED if qbit_result.get("ok") and postcheck.get("qbit_item_disappeared") else FAILED
+        if not postcheck.get("library_file_still_exists"):
+            status = FAILED
+        db.update_cleanup_execution(
+            execution_id,
+            {
+                "execution_status": status,
+                "blocking_reasons": [] if status == COMPLETED else ["Postcheck failed."],
+                "evidence": {
+                    **evidence,
+                    "precheck": precheck,
+                    "qbit_result": qbit_result,
+                    "postcheck": postcheck,
+                },
+                "completed_at": _utcnow(),
+                "transition_reason": "background worker completed execution",
+            },
+        )
+        try:
+            post_execute_poll()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("post-execute refresh failed execution_id=%s error=%s", execution_id, exc)
+    logger.info("cleanup execution finished execution_id=%s status=%s", execution_id, status)
+    return _execution_response(
+        execution_id=execution_id,
+        status=status,
+        precheck=precheck,
+        qbit_result=qbit_result,
+        postcheck=postcheck,
+    )

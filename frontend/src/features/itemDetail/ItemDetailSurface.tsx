@@ -10,6 +10,7 @@ import { useItemDetailData } from "./hooks/useItemDetailData";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
 import type { TimelineStage } from "@/api/timelineApi";
+import { AuditProfiler, measureSync, useRouteAudit } from "@/perf/audit";
 
 const STAGE_TONE: Record<string, ActivityTimelineEntry["tone"]> = {
   FAILED: "critical",
@@ -62,6 +63,16 @@ export function ItemDetailSurface() {
   const evidenceTriggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeTriggerOrigin = useRef<HTMLElement | null>(null);
+  useRouteAudit(
+    "Item Detail",
+    !library.isLoading && !timeline.isLoading && !imports.isLoading,
+    {
+      media_id: mediaId,
+      library_status: library.status,
+      timeline_status: timeline.status,
+      imports_status: imports.status,
+    },
+  );
 
   const close = () => navigate("/library");
 
@@ -88,7 +99,13 @@ export function ItemDetailSurface() {
   const artifact = library.data?.library_artifact ?? null;
   const stages = timeline.data?.stages ?? [];
   const history = imports.data?.history ?? [];
-  const entries = useMemo(() => deriveEntries(stages, history), [stages, history]);
+  const entries = useMemo(
+    () =>
+      measureSync("transform", "ItemDetail.deriveEntries", () =>
+        deriveEntries(stages, history),
+      ),
+    [stages, history],
+  );
 
   const isLoading = library.isLoading || timeline.isLoading || imports.isLoading;
   const isError = library.isError && timeline.isError && imports.isError;
@@ -105,7 +122,9 @@ export function ItemDetailSurface() {
         />
       ) : (
         <>
-          <ItemDetailHeader artifact={artifact} fallbackTitle={fallbackTitle} />
+          <AuditProfiler id="ItemDetail.Header">
+            <ItemDetailHeader artifact={artifact} fallbackTitle={fallbackTitle} />
+          </AuditProfiler>
 
           <section aria-labelledby="recent-activity-heading" className="flex flex-col gap-3">
             <div className="flex items-baseline justify-between gap-2">
@@ -121,7 +140,9 @@ export function ItemDetailSurface() {
                 Why?
               </button>
             </div>
-            <ActivityTimeline entries={entries} variant="compact" />
+            <AuditProfiler id="ItemDetail.ActivityTimeline">
+              <ActivityTimeline entries={entries} variant="compact" />
+            </AuditProfiler>
           </section>
 
           {artifact?.source_application ? (

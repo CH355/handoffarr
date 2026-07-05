@@ -4,7 +4,10 @@ import { ErrorState } from "@/components/ErrorState";
 import { EmptyState } from "@/components/EmptyState";
 import { formatBytes } from "@/lib/formatBytes";
 import { formatRelativeTime } from "@/lib/formatRelativeTime";
-import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
+import {
+  useCleanupBatchDetailQuery,
+  useCleanupExecutionsQuery,
+} from "./hooks/useCleanupReview";
 
 /* CleanupBatchDetailPage — Blueprint §4 Cleanup Batch Detail.
    R-B3: no dedicated drill-down endpoint exists; we filter the executions list
@@ -12,9 +15,12 @@ import { useCleanupExecutionsQuery } from "./hooks/useCleanupReview";
 export function CleanupBatchDetailPage() {
   const { batchId } = useParams<{ batchId: string }>();
   const executions = useCleanupExecutionsQuery(500);
+  const batchDetail = useCleanupBatchDetailQuery(batchId);
 
-  if (executions.isLoading) return <LoadingState label="Loading batch" rows={3} />;
-  if (executions.isError) {
+  if (executions.isLoading || batchDetail.isLoading) {
+    return <LoadingState label="Loading batch" rows={3} />;
+  }
+  if (executions.isError || batchDetail.isError) {
     return (
       <ErrorState
         title="Couldn't load batch"
@@ -23,7 +29,8 @@ export function CleanupBatchDetailPage() {
     );
   }
 
-  const batch = executions.data?.batches.find((b) => b.batch_id === batchId);
+  const batch =
+    batchDetail.data ?? executions.data?.batches.find((b) => b.batch_id === batchId);
   const items = (executions.data?.executions ?? []).filter(
     (e) => e.batch_id === batchId,
   );

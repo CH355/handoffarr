@@ -1,8 +1,21 @@
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { Header } from "./foundation/Header";
 import { MobileBottomTabBar } from "./foundation/MobileBottomTabBar";
+import { useEffect, useRef } from "react";
+import { auditMark } from "@/perf/audit";
 
 export function AppShell() {
+  const location = useLocation();
+  const previousPath = useRef<string | null>(null);
+
+  useEffect(() => {
+    auditMark("navigation", `${previousPath.current ?? "initial"} -> ${location.pathname}`, {
+      from: previousPath.current,
+      to: location.pathname,
+    });
+    previousPath.current = location.pathname;
+  }, [location.pathname]);
+
   return (
     <div className="min-h-full bg-bg text-text">
       <a href="#main" className="skip-link">

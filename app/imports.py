@@ -14,6 +14,7 @@ from typing import Any
 
 from . import db, states
 from .config import Config
+from .perf import timed, trace
 
 IMPORT_SUCCESS = "Import Success"
 IMPORT_FAILED = "Import Failed"
@@ -199,29 +200,46 @@ def summarize_imports(import_events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def imports_response(import_events: list[dict[str, Any]]) -> dict[str, Any]:
-    recent = sorted(
-        import_events,
-        key=lambda event: event.get("import_timestamp") or "",
-        reverse=True,
+    with timed("imports_response_sort", import_events=len(import_events)):
+        recent = sorted(
+            import_events,
+            key=lambda event: event.get("import_timestamp") or "",
+            reverse=True,
+        )
+    with timed("imports_response_partition", import_events=len(import_events)):
+        response = {
+            "summary": summarize_imports(import_events),
+            "counts": summarize_imports(import_events),
+            "recent_imports": recent[:20],
+            "failures": [
+                event for event in recent if event.get("import_status") == IMPORT_FAILED
+            ],
+            "pending_imports": [
+                event for event in recent if event.get("import_status") == IMPORT_PENDING
+            ],
+        }
+    trace(
+        "imports_response",
+        import_events=len(import_events),
+        recent=len(response["recent_imports"]),
+        failures=len(response["failures"]),
+        pending=len(response["pending_imports"]),
     )
-    return {
-        "summary": summarize_imports(import_events),
-        "counts": summarize_imports(import_events),
-        "recent_imports": recent[:20],
-        "failures": [
-            event for event in recent if event.get("import_status") == IMPORT_FAILED
-        ],
-        "pending_imports": [
-            event for event in recent if event.get("import_status") == IMPORT_PENDING
-        ],
-    }
+    return response
 
 
 def media_import_response(media_id: str, import_events: list[dict[str, Any]]) -> dict[str, Any]:
-    history = [
-        event for event in import_events if str(event.get("media_id")) == str(media_id)
-    ]
+    with timed("media_import_response_filter", media_id=media_id, import_events=len(import_events)):
+        history = [
+            event for event in import_events if str(event.get("media_id")) == str(media_id)
+        ]
     latest = history[0] if history else None
+    trace(
+        "media_import_response",
+        media_id=media_id,
+        import_events=len(import_events),
+        history=len(history),
+    )
     return {
         "media_id": media_id,
         "import_status": latest.get("import_status") if latest else None,

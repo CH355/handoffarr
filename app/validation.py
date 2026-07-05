@@ -33,6 +33,7 @@ from .library import (
     LIBRARY_PRESENT,
     enrich_library_artifacts,
 )
+from .perf import timed, trace
 
 OK = "OK"
 WARN = "WARN"
@@ -203,6 +204,7 @@ def validate_completed_execution_reconciliation(
     artifacts: list[dict[str, Any]],
     traces: list[dict[str, Any]],
     executions: list[dict[str, Any]],
+    review_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     completed_index = latest_completed_execution_index(executions)
     completed_hashes = set((completed_index.get("by_hash") or {}).keys())
@@ -213,13 +215,14 @@ def validate_completed_execution_reconciliation(
             "No completed cleanup executions require reconciliation.",
         )
 
-    review_items = build_cleanup_review(
-        cleanup_events,
-        import_events,
-        artifacts,
-        traces,
-        config,
-    )
+    if review_items is None:
+        review_items = build_cleanup_review(
+            cleanup_events,
+            import_events,
+            artifacts,
+            traces,
+            config,
+        )
     offenders: list[dict[str, Any]] = []
     for item in review_items:
         if item.get("review_class") not in {SAFE_REVIEW, RISKY_REVIEW}:
@@ -325,39 +328,85 @@ def validate_batch_execution_safety(
     )
 
 
-def run_validation(config: Config) -> dict[str, Any]:
+def run_validation(
+    config: Config,
+    *,
+    artifacts: list[dict[str, Any]] | None = None,
+    review_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Run every validation check against the current persisted state."""
-    import_events = db.all_import_events()
-    artifacts = enrich_library_artifacts(db.all_library_artifacts(), config)
-    cleanup_events = db.all_cleanup_events()
-    recommendations = db.all_recommendations()
-    executions = db.all_cleanup_executions(limit=5000)
-    batches = db.all_cleanup_execution_batches(limit=5000)
-    completed_index = latest_completed_execution_index(executions)
-    recommendation_cleanup_events = [
-        event
-        for event in cleanup_events
-        if not matching_completed_execution(event, completed_index)
-    ]
+    with timed("validation_db_read", table="import_events"):
+        import_events = db.all_import_events()
+    if artifacts is None:
+        with timed("validation_db_read", table="library_artifacts"):
+            library_artifacts = db.all_library_artifacts()
+        with timed("validation_library_enrichment", artifacts=len(library_artifacts)):
+            artifacts = enrich_library_artifacts(library_artifacts, config)
+    with timed("validation_db_read", table="cleanup_events"):
+        cleanup_events = db.all_cleanup_events()
+    with timed("validation_db_read", table="recommendations"):
+        recommendations = db.all_recommendations()
+    with timed("validation_db_read", table="cleanup_executions", limit=5000):
+        executions = db.all_cleanup_executions(limit=5000)
+    with timed("validation_db_read", table="cleanup_execution_batches", limit=5000):
+        batches = db.all_cleanup_execution_batches(limit=5000)
+    with timed("validation_completed_execution_index", executions=len(executions)):
+        completed_index = latest_completed_execution_index(executions)
+    with timed("validation_recommendation_cleanup_filter", cleanup_events=len(cleanup_events)):
+        recommendation_cleanup_events = [
+            event
+            for event in cleanup_events
+            if not matching_completed_execution(event, completed_index)
+        ]
 
-    checks = [
-        validate_imports(import_events, artifacts),
-        validate_library(artifacts),
-        validate_cleanup(artifacts, cleanup_events),
-        validate_recommendations(recommendation_cleanup_events, recommendations),
-        validate_completed_execution_reconciliation(
-            config,
-            cleanup_events,
-            import_events,
-            artifacts,
-            db.all_traces(),
-            executions,
-        ),
-        validate_batch_execution_safety(config, batches),
-    ]
+    checks = []
+    with timed("validation_check", check="imports", import_events=len(import_events), artifacts=len(artifacts)):
+        checks.append(validate_imports(import_events, artifacts))
+    with timed("validation_check", check="library", artifacts=len(artifacts)):
+        checks.append(validate_library(artifacts))
+    with timed("validation_check", check="cleanup", artifacts=len(artifacts), cleanup_events=len(cleanup_events)):
+        checks.append(validate_cleanup(artifacts, cleanup_events))
+    with timed("validation_check", check="recommendations", cleanup_events=len(recommendation_cleanup_events), recommendations=len(recommendations)):
+        checks.append(validate_recommendations(recommendation_cleanup_events, recommendations))
+    with timed("validation_db_read", table="handoff_traces"):
+        traces = db.all_traces()
+    with timed(
+        "validation_check",
+        check="completed_execution_reconciliation",
+        cleanup_events=len(cleanup_events),
+        import_events=len(import_events),
+        artifacts=len(artifacts),
+        traces=len(traces),
+        executions=len(executions),
+        review_items="provided" if review_items is not None else "generated",
+    ):
+        checks.append(
+            validate_completed_execution_reconciliation(
+                config,
+                cleanup_events,
+                import_events,
+                artifacts,
+                traces,
+                executions,
+                review_items=review_items,
+            )
+        )
+    with timed("validation_check", check="batch_execution_safety", batches=len(batches)):
+        checks.append(validate_batch_execution_safety(config, batches))
     overall = OK
     if any(c["status"] == FAIL for c in checks):
         overall = FAIL
     elif any(c["status"] == WARN for c in checks):
         overall = WARN
+    trace(
+        "validation_response",
+        status=overall,
+        checks=len(checks),
+        import_events=len(import_events),
+        artifacts=len(artifacts),
+        cleanup_events=len(cleanup_events),
+        recommendations=len(recommendations),
+        executions=len(executions),
+        batches=len(batches),
+    )
     return {"status": overall, "checks": checks}

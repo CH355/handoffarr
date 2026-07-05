@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -20,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from . import db, timeline
+from . import torrents as torrent_projection
 from .collectors import (
     cleanup as cleanup_collector,
     decision as decision_collector,
@@ -34,7 +36,6 @@ from .collectors import (
 )
 from .cleanup import cleanup_response, media_cleanup_response, run_cleanup_visibility
 from .cleanup_review import (
-    build_cleanup_review,
     cleanup_action_plan_response,
     cleanup_action_plan_text,
     cleanup_review_response,
@@ -45,10 +46,12 @@ from .config import Config, load_config
 from .correlation import correlation_report, run_correlation
 from .cleanup_execution import (
     batch_dry_run as cleanup_execution_batch_dry_run,
-    batch_execute as cleanup_execution_batch_execute,
     config_status as cleanup_execution_config_status,
     dry_run as cleanup_execution_dry_run,
-    execute as cleanup_execute,
+    run_queued_batch as cleanup_execution_run_queued_batch,
+    run_queued_execution as cleanup_execution_run_queued_execution,
+    submit_batch_execute as cleanup_execution_submit_batch_execute,
+    submit_execute as cleanup_execution_submit_execute,
 )
 from .decision import (
     decisions_response,
@@ -73,6 +76,12 @@ from .responsibility import (
     summarize_assessments,
 )
 from .validation import run_validation
+from .perf import timed, trace
+from .projections import (
+    cached_cleanup_review_items,
+    cached_enriched_library_artifacts,
+    cached_validation,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,9 +226,37 @@ async def _poll_loop() -> None:
         await asyncio.sleep(max(5, interval))
 
 
+async def _cleanup_execution_loop() -> None:
+    while True:
+        config = get_config()
+        try:
+            batch = await asyncio.to_thread(lambda: (db.queued_cleanup_execution_batches(1) or [None])[0])
+            if batch is not None:
+                await asyncio.to_thread(
+                    cleanup_execution_run_queued_batch,
+                    batch,
+                    config=config,
+                    post_execute_poll=poll_once,
+                )
+                continue
+            execution = await asyncio.to_thread(lambda: (db.queued_cleanup_executions(1) or [None])[0])
+            if execution is not None:
+                await asyncio.to_thread(
+                    cleanup_execution_run_queued_execution,
+                    execution,
+                    config=config,
+                    post_execute_poll=poll_once,
+                )
+                continue
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Cleanup execution worker crashed during iteration: %s", exc)
+        await asyncio.sleep(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    db.requeue_incomplete_cleanup_work()
     config = get_config()
     if config.is_present:
         # Kick off an immediate poll, then run the loop in the background.
@@ -229,11 +266,13 @@ async def lifespan(app: FastAPI):
             "Config missing at %s; dashboard will show setup message", config.path
         )
         task = None
+    cleanup_task = asyncio.create_task(_cleanup_execution_loop())
     try:
         yield
     finally:
         if task is not None:
             task.cancel()
+        cleanup_task.cancel()
 
 
 app = FastAPI(title="Handoffarr", lifespan=lifespan)
@@ -242,7 +281,17 @@ app = FastAPI(title="Handoffarr", lifespan=lifespan)
 @app.get("/api/health")
 async def health() -> JSONResponse:
     config = get_config()
-    return JSONResponse({"status": "ok", "config_present": config.is_present})
+    torrent_status = torrent_projection.torrent_response(
+        db.all_qbittorrent_torrents()
+    )
+    return JSONResponse(
+        {
+            "status": "ok",
+            "config_present": config.is_present,
+            **torrent_status["summary"],
+            "dead_torrents_health": torrent_status["health"],
+        }
+    )
 
 
 @app.get("/timeline", response_class=HTMLResponse)
@@ -302,19 +351,76 @@ async def api_imports() -> JSONResponse:
 
 @app.get("/api/imports/{media_id}")
 async def api_import_media(media_id: str) -> JSONResponse:
-    return JSONResponse(media_import_response(media_id, db.all_import_events(media_id)))
+    endpoint = "/api/imports/{media_id}"
+    start = time.perf_counter()
+    with timed("endpoint_stage", endpoint=endpoint, stage="db_import_events", media_id=media_id):
+        import_events = db.all_import_events(media_id)
+    with timed("endpoint_stage", endpoint=endpoint, stage="projection_import_response", media_id=media_id, import_events=len(import_events)):
+        payload = media_import_response(media_id, import_events)
+    with timed("endpoint_stage", endpoint=endpoint, stage="json_response", media_id=media_id):
+        response = JSONResponse(payload)
+    trace(
+        "endpoint_trace",
+        endpoint=endpoint,
+        media_id=media_id,
+        total_ms=f"{(time.perf_counter() - start) * 1000:.2f}",
+        db_queries=1,
+        import_events=len(import_events),
+        history=len(payload.get("history") or []),
+        payload_bytes=len(response.body),
+    )
+    return response
 
 
 @app.get("/api/library")
 async def api_library() -> JSONResponse:
-    return JSONResponse(library_response(db.all_library_artifacts(), get_config()))
+    endpoint = "/api/library"
+    start = time.perf_counter()
+    config = get_config()
+    with timed("endpoint_stage", endpoint=endpoint, stage="db_library_artifacts"):
+        artifacts = db.all_library_artifacts()
+    with timed("endpoint_stage", endpoint=endpoint, stage="projection_library_response", artifacts=len(artifacts)):
+        payload = library_response(artifacts, config)
+    with timed("endpoint_stage", endpoint=endpoint, stage="json_response"):
+        response = JSONResponse(payload)
+    trace(
+        "endpoint_trace",
+        endpoint=endpoint,
+        total_ms=f"{(time.perf_counter() - start) * 1000:.2f}",
+        db_queries=3,
+        library_artifacts=len(artifacts),
+        response_artifacts=len(payload.get("artifacts") or []),
+        present=len(payload.get("present") or []),
+        missing=len(payload.get("missing") or []),
+        unknown=len(payload.get("unknown") or []),
+        cleanup_candidates=len(payload.get("potential_cleanup_candidates") or []),
+        payload_bytes=len(response.body),
+    )
+    return response
 
 
 @app.get("/api/library/{media_id}")
 async def api_library_media(media_id: str) -> JSONResponse:
-    return JSONResponse(
-        media_library_response(media_id, db.all_library_artifacts(media_id), get_config())
+    endpoint = "/api/library/{media_id}"
+    start = time.perf_counter()
+    config = get_config()
+    with timed("endpoint_stage", endpoint=endpoint, stage="db_library_artifacts", media_id=media_id):
+        artifacts = db.all_library_artifacts(media_id)
+    with timed("endpoint_stage", endpoint=endpoint, stage="projection_library_response", media_id=media_id, artifacts=len(artifacts)):
+        payload = media_library_response(media_id, artifacts, config)
+    with timed("endpoint_stage", endpoint=endpoint, stage="json_response", media_id=media_id):
+        response = JSONResponse(payload)
+    trace(
+        "endpoint_trace",
+        endpoint=endpoint,
+        media_id=media_id,
+        total_ms=f"{(time.perf_counter() - start) * 1000:.2f}",
+        db_queries=3,
+        library_artifacts=len(artifacts),
+        found=bool(payload.get("library_artifact")),
+        payload_bytes=len(response.body),
     )
+    return response
 
 
 @app.get("/api/cleanup")
@@ -323,13 +429,7 @@ async def api_cleanup() -> JSONResponse:
 
 
 def _cleanup_review_items() -> list[dict]:
-    return build_cleanup_review(
-        db.all_cleanup_events(),
-        db.all_import_events(),
-        db.all_library_artifacts(),
-        db.all_traces(),
-        get_config(),
-    )
+    return cached_cleanup_review_items(get_config())
 
 
 @app.get("/api/cleanup/action-plan")
@@ -382,13 +482,32 @@ async def api_cleanup_action_plan_text(
 @app.get("/api/cleanup/executions")
 async def api_cleanup_executions(limit: int = 100) -> JSONResponse:
     config = get_config()
-    return JSONResponse(
-        {
+    safe_limit = max(1, min(limit, 500))
+    with timed("execution_history_generation", limit=safe_limit, detail="summary"):
+        payload = {
             "config": cleanup_execution_config_status(config),
-            "executions": db.all_cleanup_executions(limit=max(1, min(limit, 500))),
-            "batches": db.all_cleanup_execution_batches(limit=max(1, min(limit, 500))),
+            "executions": db.cleanup_execution_summaries(limit=safe_limit),
+            "batches": db.cleanup_execution_batch_summaries(limit=safe_limit),
         }
-    )
+    return JSONResponse(payload)
+
+
+@app.get("/api/cleanup/executions/{execution_id}")
+async def api_cleanup_execution_detail(execution_id: str) -> JSONResponse:
+    item = db.cleanup_execution(execution_id)
+    if item is None:
+        return JSONResponse({"error": "execution not found"}, status_code=404)
+    item["status_transitions"] = db.cleanup_status_transitions("execution", execution_id)
+    return JSONResponse(item)
+
+
+@app.get("/api/cleanup/execution-batches/{batch_id}")
+async def api_cleanup_execution_batch_detail(batch_id: str) -> JSONResponse:
+    item = db.cleanup_execution_batch(batch_id)
+    if item is None:
+        return JSONResponse({"error": "batch not found"}, status_code=404)
+    item["status_transitions"] = db.cleanup_status_transitions("batch", batch_id)
+    return JSONResponse(item)
 
 
 @app.post("/api/cleanup/execute/dry-run")
@@ -424,18 +543,17 @@ async def api_cleanup_execute_batch_dry_run(payload: dict) -> JSONResponse:
 
 @app.post("/api/cleanup/execute/batch")
 async def api_cleanup_execute_batch(payload: dict) -> JSONResponse:
-    result = cleanup_execution_batch_execute(
+    result = cleanup_execution_submit_batch_execute(
         plan_id=str(payload.get("plan_id") or ""),
         confirmation=str(payload.get("confirmation") or ""),
         config=get_config(),
-        post_execute_poll=poll_once,
     )
     return JSONResponse(result)
 
 
 @app.post("/api/cleanup/execute")
 async def api_cleanup_execute(payload: dict) -> JSONResponse:
-    result = cleanup_execute(
+    result = cleanup_execution_submit_execute(
         media_id=str(payload.get("media_id") or ""),
         qbit_hash=str(payload.get("qbit_hash") or ""),
         confirmation=str(payload.get("confirmation") or ""),
@@ -444,7 +562,6 @@ async def api_cleanup_execute(payload: dict) -> JSONResponse:
         library_artifacts=db.all_library_artifacts(),
         traces=db.all_traces(),
         config=get_config(),
-        post_execute_poll=poll_once,
     )
     return JSONResponse(result)
 
@@ -460,8 +577,8 @@ async def api_cleanup_review(
     offset: int = 0,
     sort: str | None = None,
 ) -> JSONResponse:
-    return JSONResponse(
-        cleanup_review_response(
+    with timed("cleanup_review_generation", cache="endpoint"):
+        payload = cleanup_review_response(
             _cleanup_review_items(),
             review_class=review_class,
             match_strength=match_strength,
@@ -472,7 +589,7 @@ async def api_cleanup_review(
             offset=offset,
             sort=sort,
         )
-    )
+    return JSONResponse(payload)
 
 
 @app.get("/api/cleanup/review/{media_id}/checklist")
@@ -602,6 +719,82 @@ async def api_poll_now() -> JSONResponse:
     return JSONResponse({"status": "ok", "results": results})
 
 
+@app.get("/api/torrents")
+async def api_torrents() -> JSONResponse:
+    return JSONResponse(
+        torrent_projection.torrent_response(db.all_qbittorrent_torrents())
+    )
+
+
+@app.post("/api/torrents/remove-dead")
+async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
+    raw_hashes = payload.get("hashes")
+    if not isinstance(raw_hashes, list):
+        return JSONResponse({"error": "hashes must be a list"}, status_code=422)
+    hashes = list(
+        dict.fromkeys(
+            str(value or "").strip().lower()
+            for value in raw_hashes
+            if str(value or "").strip()
+        )
+    )
+    current = {
+        str(torrent.get("hash") or "").lower(): torrent
+        for torrent in db.all_qbittorrent_torrents()
+    }
+    invalid = [
+        torrent_hash
+        for torrent_hash in hashes
+        if not current.get(torrent_hash, {}).get("dead_torrent")
+    ]
+    if not hashes or invalid:
+        return JSONResponse(
+            {
+                "error": "only currently detected dead torrents may be removed",
+                "invalid_hashes": invalid,
+            },
+            status_code=400,
+        )
+
+    result = await asyncio.to_thread(
+        qbittorrent.delete_torrents, get_config(), hashes, delete_files=False
+    )
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=502)
+    db.remove_qbittorrent_torrents(hashes)
+    return JSONResponse(
+        {
+            "ok": True,
+            "removed": len(hashes),
+            "hashes": hashes,
+            "delete_files": False,
+        }
+    )
+
+
+@app.post("/api/torrents/retry-dead")
+async def api_retry_dead_torrents(payload: dict) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": (
+                "Automatic failed-download/blocklist and search integration "
+                "is not available."
+            )
+        },
+        status_code=501,
+    )
+
+
+@app.get("/api/torrents/{torrent_hash}")
+async def api_torrent(torrent_hash: str) -> JSONResponse:
+    torrent = torrent_projection.torrent_detail(
+        torrent_hash, db.all_qbittorrent_torrents()
+    )
+    if torrent is None:
+        return JSONResponse({"error": "torrent not found"}, status_code=404)
+    return JSONResponse(torrent)
+
+
 # --- Debug inspection endpoints (read-only) -------------------------------
 # These hit the live service APIs (or recompute correlation from stored events)
 # to expose raw payloads, normalized objects, extraction diagnostics and
@@ -679,10 +872,40 @@ async def debug_imports() -> JSONResponse:
 
 @app.get("/api/validation")
 async def api_validation() -> JSONResponse:
+    endpoint = "/api/validation"
+    start = time.perf_counter()
     config = get_config()
-    result = await asyncio.to_thread(run_validation, config)
+
+    def _run() -> dict:
+        with timed("endpoint_stage", endpoint=endpoint, stage="validation_cache_lookup"):
+            return cached_validation(
+                config,
+                lambda cfg: run_validation(
+                    cfg,
+                    artifacts=cached_enriched_library_artifacts(cfg),
+                    review_items=cached_cleanup_review_items(cfg),
+                ),
+            )
+
+    with timed("endpoint_stage", endpoint=endpoint, stage="threaded_validation"):
+        result = await asyncio.to_thread(_run)
     status_code = 200 if result["status"] != "FAIL" else 200
-    return JSONResponse(result, status_code=status_code)
+    with timed("endpoint_stage", endpoint=endpoint, stage="json_response", status=result.get("status")):
+        response = JSONResponse(result, status_code=status_code)
+    trace(
+        "endpoint_trace",
+        endpoint=endpoint,
+        total_ms=f"{(time.perf_counter() - start) * 1000:.2f}",
+        status=result.get("status"),
+        checks=len(result.get("checks") or []),
+        payload_bytes=len(response.body),
+    )
+    return response
+
+
+@app.get("/api/database/health")
+async def api_database_health() -> JSONResponse:
+    return JSONResponse(await asyncio.to_thread(db.database_health))
 
 
 @app.get("/api/debug/export")

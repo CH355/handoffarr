@@ -203,6 +203,30 @@ def init_db() -> None:
                 evidence_json TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS cleanup_execution_status_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT,
+                entity_id TEXT,
+                from_status TEXT,
+                to_status TEXT,
+                reason TEXT,
+                observed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS projection_snapshots (
+                projection_key TEXT PRIMARY KEY,
+                fingerprint TEXT,
+                payload_json TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS qbittorrent_torrents (
+                torrent_hash TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
@@ -241,6 +265,8 @@ def init_db() -> None:
                 ON cleanup_executions (media_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_cleanup_execution_batches_batch
                 ON cleanup_execution_batches (batch_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_cleanup_execution_status_entity
+                ON cleanup_execution_status_transitions (entity_type, entity_id, observed_at);
             """
         )
         _migrate_handoff_traces(conn)
@@ -304,6 +330,27 @@ def _migrate_cleanup_executions(conn: sqlite3.Connection) -> None:
     )
 
 
+def _record_status_transition(
+    conn: sqlite3.Connection,
+    *,
+    entity_type: str,
+    entity_id: str | None,
+    from_status: str | None,
+    to_status: str | None,
+    reason: str | None = None,
+) -> None:
+    if not entity_id or from_status == to_status:
+        return
+    conn.execute(
+        """
+        INSERT INTO cleanup_execution_status_transitions
+            (entity_type, entity_id, from_status, to_status, reason, observed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (entity_type, entity_id, from_status, to_status, reason, _utcnow()),
+    )
+
+
 def insert_raw_event(
     *,
     source: str,
@@ -360,6 +407,68 @@ def events_for_source_since(source: str, since_iso: str) -> list[dict[str, Any]]
             (source, since_iso),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def replace_qbittorrent_torrents(torrents: list[dict[str, Any]]) -> None:
+    """Atomically replace the current qBittorrent snapshot."""
+    observed_at = _utcnow()
+    with _lock, _connect() as conn:
+        previous = {
+            row["torrent_hash"]: json.loads(row["payload_json"])
+            for row in conn.execute(
+                "SELECT torrent_hash, payload_json FROM qbittorrent_torrents"
+            ).fetchall()
+        }
+        conn.execute("DELETE FROM qbittorrent_torrents")
+        rows = []
+        for torrent in torrents:
+            torrent_hash = str(torrent.get("hash") or "").lower()
+            if not torrent_hash:
+                continue
+            payload = dict(torrent)
+            was_dead = previous.get(torrent_hash, {}).get("dead_torrent") is True
+            payload["dead_since"] = (
+                previous[torrent_hash].get("dead_since", observed_at)
+                if payload.get("dead_torrent") and was_dead
+                else observed_at if payload.get("dead_torrent") else None
+            )
+            rows.append(
+                (torrent_hash, json.dumps(payload, default=str), observed_at)
+            )
+        conn.executemany(
+            """
+            INSERT INTO qbittorrent_torrents
+                (torrent_hash, payload_json, observed_at)
+            VALUES (?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def all_qbittorrent_torrents() -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT payload_json, observed_at FROM qbittorrent_torrents "
+            "ORDER BY observed_at DESC, torrent_hash"
+        ).fetchall()
+    torrents = []
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        payload["observed_at"] = row["observed_at"]
+        torrents.append(payload)
+    return torrents
+
+
+def remove_qbittorrent_torrents(torrent_hashes: list[str]) -> None:
+    hashes = [str(value).lower() for value in torrent_hashes if value]
+    if not hashes:
+        return
+    placeholders = ",".join("?" for _ in hashes)
+    with _lock, _connect() as conn:
+        conn.execute(
+            f"DELETE FROM qbittorrent_torrents WHERE torrent_hash IN ({placeholders})",
+            hashes,
+        )
 
 
 def replace_traces(traces: list[dict[str, Any]]) -> None:
@@ -904,10 +1013,23 @@ def insert_cleanup_execution(execution: dict[str, Any]) -> None:
                 execution.get("completed_at"),
             ),
         )
+        _record_status_transition(
+            conn,
+            entity_type="execution",
+            entity_id=execution.get("execution_id"),
+            from_status=None,
+            to_status=execution.get("execution_status"),
+            reason="insert",
+        )
 
 
 def update_cleanup_execution(execution_id: str, updates: dict[str, Any]) -> None:
     with _lock, _connect() as conn:
+        previous = conn.execute(
+            "SELECT execution_status FROM cleanup_executions WHERE execution_id = ? ORDER BY id DESC LIMIT 1",
+            (execution_id,),
+        ).fetchone()
+        completed_at = updates["completed_at"] if "completed_at" in updates else _utcnow()
         conn.execute(
             """
             UPDATE cleanup_executions
@@ -921,9 +1043,17 @@ def update_cleanup_execution(execution_id: str, updates: dict[str, Any]) -> None
                 updates.get("execution_status"),
                 json.dumps(updates.get("blocking_reasons") or []),
                 json.dumps(updates.get("evidence") or {}, default=str),
-                updates.get("completed_at") or _utcnow(),
+                completed_at,
                 execution_id,
             ),
+        )
+        _record_status_transition(
+            conn,
+            entity_type="execution",
+            entity_id=execution_id,
+            from_status=previous["execution_status"] if previous else None,
+            to_status=updates.get("execution_status"),
+            reason=str(updates.get("transition_reason") or "update"),
         )
 
 
@@ -953,6 +1083,59 @@ def all_cleanup_executions(limit: int = 100) -> list[dict[str, Any]]:
     return executions
 
 
+def cleanup_execution(execution_id: str) -> dict[str, Any] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM cleanup_executions WHERE execution_id = ? ORDER BY id DESC LIMIT 1",
+            (execution_id,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    for stored_key, public_key, default in (
+        ("blocking_reasons_json", "blocking_reasons", []),
+        ("evidence_json", "evidence", {}),
+    ):
+        raw = item.pop(stored_key, None)
+        if raw:
+            try:
+                item[public_key] = json.loads(raw)
+            except (TypeError, ValueError):
+                item[public_key] = default
+        else:
+            item[public_key] = default
+    return item
+
+
+def cleanup_execution_summaries(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT execution_id, batch_id, media_id, media_title, qbit_hash,
+                   review_class, match_strength, requested_action, execution_status,
+                   recoverable_bytes, created_at, completed_at,
+                   blocking_reasons_json
+            FROM cleanup_executions
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw = item.pop("blocking_reasons_json", None)
+        if raw:
+            try:
+                item["blocking_reasons"] = json.loads(raw)
+            except (TypeError, ValueError):
+                item["blocking_reasons"] = []
+        else:
+            item["blocking_reasons"] = []
+        out.append(item)
+    return out
+
+
 def insert_cleanup_execution_batch(batch: dict[str, Any]) -> None:
     created_default = _utcnow()
     with _lock, _connect() as conn:
@@ -977,10 +1160,23 @@ def insert_cleanup_execution_batch(batch: dict[str, Any]) -> None:
                 json.dumps(batch.get("evidence") or {}, default=str),
             ),
         )
+        _record_status_transition(
+            conn,
+            entity_type="batch",
+            entity_id=batch.get("batch_id"),
+            from_status=None,
+            to_status=batch.get("status"),
+            reason="insert",
+        )
 
 
 def update_cleanup_execution_batch(batch_id: str, updates: dict[str, Any]) -> None:
     with _lock, _connect() as conn:
+        previous = conn.execute(
+            "SELECT status FROM cleanup_execution_batches WHERE batch_id = ? ORDER BY id DESC LIMIT 1",
+            (batch_id,),
+        ).fetchone()
+        completed_at = updates["completed_at"] if "completed_at" in updates else _utcnow()
         conn.execute(
             """
             UPDATE cleanup_execution_batches
@@ -997,10 +1193,18 @@ def update_cleanup_execution_batch(batch_id: str, updates: dict[str, Any]) -> No
                 updates.get("completed_count", 0),
                 updates.get("failed_count", 0),
                 updates.get("actual_recovered_bytes", 0),
-                updates.get("completed_at") or _utcnow(),
+                completed_at,
                 json.dumps(updates.get("evidence") or {}, default=str),
                 batch_id,
             ),
+        )
+        _record_status_transition(
+            conn,
+            entity_type="batch",
+            entity_id=batch_id,
+            from_status=previous["status"] if previous else None,
+            to_status=updates.get("status"),
+            reason=str(updates.get("transition_reason") or "update"),
         )
 
 
@@ -1043,3 +1247,279 @@ def all_cleanup_execution_batches(limit: int = 100) -> list[dict[str, Any]]:
             item["evidence"] = {}
         out.append(item)
     return out
+
+
+def cleanup_execution_batch_summaries(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT batch_id, status, item_count, completed_count, failed_count,
+                   planned_recoverable_bytes, actual_recovered_bytes,
+                   created_at, completed_at
+            FROM cleanup_execution_batches
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def cleanup_status_transitions(entity_type: str, entity_id: str) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT entity_type, entity_id, from_status, to_status, reason, observed_at
+            FROM cleanup_execution_status_transitions
+            WHERE entity_type = ? AND entity_id = ?
+            ORDER BY id ASC
+            """,
+            (entity_type, entity_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def queued_cleanup_executions(limit: int = 10) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT execution_id
+            FROM cleanup_executions
+            WHERE execution_status = 'Queued'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = cleanup_execution(row["execution_id"])
+        if item:
+            out.append(item)
+    return out
+
+
+def queued_cleanup_execution_batches(limit: int = 10) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT batch_id
+            FROM cleanup_execution_batches
+            WHERE status = 'Queued'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = cleanup_execution_batch(row["batch_id"])
+        if item:
+            out.append(item)
+    return out
+
+
+def requeue_incomplete_cleanup_work() -> None:
+    with _lock, _connect() as conn:
+        for table, id_col, status_col in (
+            ("cleanup_executions", "execution_id", "execution_status"),
+            ("cleanup_execution_batches", "batch_id", "status"),
+        ):
+            rows = conn.execute(
+                f"SELECT {id_col}, {status_col} FROM {table} WHERE {status_col} = 'Running'"
+            ).fetchall()
+            conn.execute(
+                f"UPDATE {table} SET {status_col} = 'Queued', completed_at = NULL WHERE {status_col} = 'Running'"
+            )
+            entity_type = "execution" if table == "cleanup_executions" else "batch"
+            for row in rows:
+                _record_status_transition(
+                    conn,
+                    entity_type=entity_type,
+                    entity_id=row[id_col],
+                    from_status=row[status_col],
+                    to_status="Queued",
+                    reason="startup recovery",
+                )
+
+
+def projection_snapshot(key: str) -> dict[str, Any] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM projection_snapshots WHERE projection_key = ?",
+            (key,),
+        ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    raw = item.pop("payload_json", None)
+    if raw:
+        try:
+            item["payload"] = json.loads(raw)
+        except (TypeError, ValueError):
+            item["payload"] = None
+    else:
+        item["payload"] = None
+    return item
+
+
+def upsert_projection_snapshot(key: str, fingerprint: str, payload: Any) -> None:
+    now = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO projection_snapshots
+                (projection_key, fingerprint, payload_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(projection_key) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            (key, fingerprint, json.dumps(payload, default=str), now, now),
+        )
+
+
+def table_fingerprint(table: str) -> dict[str, Any]:
+    allowed = {
+        "cleanup_events",
+        "import_events",
+        "library_artifacts",
+        "handoff_traces",
+        "cleanup_executions",
+        "cleanup_execution_batches",
+        "recommendations",
+        "raw_events",
+    }
+    if table not in allowed:
+        raise ValueError(f"Unsupported fingerprint table: {table}")
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id FROM {table}"
+        ).fetchone()
+    return {"table": table, "count": row["count"], "max_id": row["max_id"]}
+
+
+def raw_event_fingerprint(source: str, event_type: str | None = None) -> dict[str, Any]:
+    with _lock, _connect() as conn:
+        if event_type is None:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+                FROM raw_events
+                WHERE source = ?
+                """,
+                (source,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+                FROM raw_events
+                WHERE source = ? AND event_type = ?
+                """,
+                (source, event_type),
+            ).fetchone()
+    return {
+        "table": "raw_events",
+        "source": source,
+        "event_type": event_type,
+        "count": row["count"],
+        "max_id": row["max_id"],
+    }
+
+
+def completed_cleanup_execution_fingerprint() -> dict[str, Any]:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+            FROM cleanup_executions
+            WHERE execution_status = 'Completed'
+            """
+        ).fetchone()
+    return {
+        "table": "cleanup_executions",
+        "execution_status": "Completed",
+        "count": row["count"],
+        "max_id": row["max_id"],
+    }
+
+
+def database_health() -> dict[str, Any]:
+    tables = [
+        "raw_events",
+        "handoff_traces",
+        "import_events",
+        "library_artifacts",
+        "cleanup_events",
+        "recommendations",
+        "timeline_events",
+        "decision_assessments",
+        "responsibility_assessments",
+        "cleanup_executions",
+        "cleanup_execution_batches",
+        "cleanup_execution_status_transitions",
+        "projection_snapshots",
+    ]
+    with _lock, _connect() as conn:
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        raw_max_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM raw_events"
+        ).fetchone()[0]
+        table_rows = {"raw_events": int(raw_max_id or 0)}
+        for table in tables:
+            if table == "raw_events":
+                continue
+            table_rows[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        oldest_raw_row = conn.execute(
+            "SELECT observed_at FROM raw_events ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+        newest_raw_row = conn.execute(
+            "SELECT observed_at FROM raw_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    size_bytes = int(page_count or 0) * int(page_size or 0)
+    free_bytes = int(freelist_count or 0) * int(page_size or 0)
+    oldest_raw = oldest_raw_row["observed_at"] if oldest_raw_row else None
+    newest_raw = newest_raw_row["observed_at"] if newest_raw_row else None
+    raw_count = int(table_rows.get("raw_events") or 0)
+    average_rows_per_day = 0.0
+    try:
+        if oldest_raw and newest_raw:
+            oldest_dt = datetime.fromisoformat(str(oldest_raw))
+            newest_dt = datetime.fromisoformat(str(newest_raw))
+            days = max((newest_dt - oldest_dt).total_seconds() / 86400, 1 / 24)
+            average_rows_per_day = round(raw_count / days, 2)
+    except (TypeError, ValueError):
+        average_rows_per_day = 0.0
+    return {
+        "database_path": DB_PATH,
+        "size_bytes": size_bytes,
+        "free_bytes": free_bytes,
+        "page_count": page_count,
+        "page_size": page_size,
+        "row_counts": table_rows,
+        "row_count_notes": {
+            "raw_events": "estimated from MAX(id) to avoid full-table COUNT on append-only telemetry"
+        },
+        "raw_events": {
+            "oldest_observed_at": oldest_raw,
+            "newest_observed_at": newest_raw,
+            "average_rows_per_day_observed_window": average_rows_per_day,
+        },
+        "retention_candidates": [
+            {
+                "table": "raw_events",
+                "reason": "append-only collector payloads dominate growth",
+                "control": "disabled by default; no automatic purge configured",
+            },
+            {
+                "table": "cleanup_execution_status_transitions",
+                "reason": "audit trail; retain unless explicit operator policy is added",
+                "control": "disabled by default; no automatic purge configured",
+            },
+        ],
+        "retention_controls_enabled": False,
+    }

@@ -9,6 +9,8 @@ import { formatRelativeTime } from "@/lib/formatRelativeTime";
 import { useHomeData } from "./hooks/useHomeData";
 import type { CleanupResponse, CleanupCandidate } from "@/api/cleanupApi";
 import type { ValidationResponse } from "@/api/validationApi";
+import type { TorrentsResponse } from "@/api/torrentsApi";
+import { AuditProfiler, measureSync, useRouteAudit } from "@/perf/audit";
 
 type BannerVariant = "critical" | "recover" | "stuck" | "idle";
 
@@ -25,7 +27,18 @@ interface BannerData {
 function deriveBanner(
   cleanup: CleanupResponse | undefined,
   validation: ValidationResponse | undefined,
+  torrents: TorrentsResponse | undefined,
 ): BannerData {
+  if ((torrents?.summary.dead_torrents ?? 0) > 0) {
+    return {
+      variant: "stuck",
+      headline: "Some downloads cannot complete because no seeders exist.",
+      subline: `${torrents?.summary.dead_torrents} dead torrent${torrents?.summary.dead_torrents === 1 ? "" : "s"} detected`,
+      actionLabel: "Review Dead Torrents",
+      actionTo: "/torrents?status=dead",
+    };
+  }
+
   if (validation?.status === "FAIL") {
     const failing = validation.checks.find((c) => c.status === "FAIL");
     return {
@@ -77,14 +90,30 @@ function lastCleanupTimestamp(cleanup: CleanupResponse | undefined): string | nu
 }
 
 export function HomePage() {
-  const { cleanup, validation, storage, imports } = useHomeData();
+  const { cleanup, validation, storage, imports, torrents } = useHomeData();
+  const dataReady =
+    !cleanup.isLoading &&
+    !validation.isLoading &&
+    !storage.isLoading &&
+    !imports.isLoading &&
+    !torrents.isLoading;
+  useRouteAudit("Home", dataReady, {
+    cleanup_status: cleanup.status,
+    validation_status: validation.status,
+    storage_status: storage.status,
+    imports_status: imports.status,
+  });
 
   const banner = useMemo(
-    () => deriveBanner(cleanup.data, validation.data),
-    [cleanup.data, validation.data],
+    () =>
+      measureSync("transform", "Home.deriveBanner", () =>
+        deriveBanner(cleanup.data, validation.data, torrents.data),
+      ),
+    [cleanup.data, validation.data, torrents.data],
   );
 
-  const bannerLoading = cleanup.isLoading || validation.isLoading;
+  const bannerLoading =
+    cleanup.isLoading || validation.isLoading || torrents.isLoading;
   const bannerError =
     cleanup.isError && validation.isError && !cleanup.data && !validation.data;
 
@@ -110,34 +139,45 @@ export function HomePage() {
           description="The backend is unreachable. Reload once it's back."
         />
       ) : (
-        <PrimaryBanner {...banner} />
+        <AuditProfiler id="Home.PrimaryBanner">
+          <PrimaryBanner {...banner} />
+        </AuditProfiler>
       )}
 
-      <StatTileRow
-        storage={{
-          data: storage.data,
-          isLoading: storage.isLoading,
-          isError: storage.isError,
-        }}
-        imports={{
-          data: imports.data,
-          isLoading: imports.isLoading,
-          isError: imports.isError,
-        }}
-        validation={{
-          data: validation.data,
-          isLoading: validation.isLoading,
-          isError: validation.isError,
-        }}
-      />
+      <AuditProfiler id="Home.StatTileRow">
+        <StatTileRow
+          storage={{
+            data: storage.data,
+            isLoading: storage.isLoading,
+            isError: storage.isError,
+          }}
+          imports={{
+            data: imports.data,
+            isLoading: imports.isLoading,
+            isError: imports.isError,
+          }}
+          validation={{
+            data: validation.data,
+            isLoading: validation.isLoading,
+            isError: validation.isError,
+          }}
+          torrents={{
+            data: torrents.data,
+            isLoading: torrents.isLoading,
+            isError: torrents.isError,
+          }}
+        />
+      </AuditProfiler>
 
-      <RecentlyAddedSection
-        state={{
-          data: imports.data,
-          isLoading: imports.isLoading,
-          isError: imports.isError,
-        }}
-      />
+      <AuditProfiler id="Home.RecentlyAddedSection">
+        <RecentlyAddedSection
+          state={{
+            data: imports.data,
+            isLoading: imports.isLoading,
+            isError: imports.isError,
+          }}
+        />
+      </AuditProfiler>
     </section>
   );
 }
