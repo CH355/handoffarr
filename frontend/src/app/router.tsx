@@ -22,6 +22,8 @@ const RecoveryPlansPage = lazy(() => import("@/features/recoveryAgent/RecoveryPl
 const RecoveryPlanDetailPage = lazy(() => import("@/features/recoveryAgent/RecoveryPlanDetailPage").then(module => ({ default: module.RecoveryPlanDetailPage })));
 const RecoveryHistoryPage = lazy(() => import("@/features/recoveryAgent/RecoveryHistoryPage").then(module => ({ default: module.RecoveryHistoryPage })));
 const RecoveryActivityPage = lazy(() => import("@/features/recoveryAgent/RecoveryActivityPage").then(module => ({ default: module.RecoveryActivityPage })));
+const ExecutionCenterPage = lazy(() => import("@/features/executionEngine/ExecutionCenterPage").then(module => ({ default: module.ExecutionCenterPage })));
+const ExecutionDetailPage = lazy(() => import("@/features/executionEngine/ExecutionDetailPage").then(module => ({ default: module.ExecutionDetailPage })));
 
 function deferred(element: ReactNode) {
   return <Suspense fallback={<div className="m-6 h-64 animate-pulse rounded-lg bg-surface" aria-label="Loading page" />}>{element}</Suspense>;
@@ -56,6 +58,8 @@ export const router = createBrowserRouter([
       { path: "recovery-agent/plans/:planId", element: deferred(<RecoveryPlanDetailPage />) },
       { path: "recovery-agent/history", element: deferred(<RecoveryHistoryPage />) },
       { path: "recovery-agent/activity", element: deferred(<RecoveryActivityPage />) },
+      { path: "execution-center", element: deferred(<ExecutionCenterPage />) },
+      { path: "execution-center/:executionId", element: deferred(<ExecutionDetailPage />) },
       { path: "health", element: deferred(<AuditProfiler id="route:Health"><HealthPage /></AuditProfiler>) },
       {
         path: "health/integrations/:integrationId",

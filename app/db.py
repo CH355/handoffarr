@@ -322,6 +322,34 @@ def init_db() -> None:
                 decision TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS execution_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT UNIQUE NOT NULL,
+                plan_id TEXT NOT NULL,
+                torrent_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'manual',
+                created_at TEXT NOT NULL,
+                approved_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                current_step INTEGER NOT NULL DEFAULT 0,
+                total_steps INTEGER NOT NULL DEFAULT 0,
+                current_action TEXT,
+                error TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                rollback_available INTEGER NOT NULL DEFAULT 0,
+                audit_log_json TEXT,
+                timeline_json TEXT,
+                results_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_execution_jobs_status
+                ON execution_jobs (status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_execution_jobs_torrent
+                ON execution_jobs (torrent_hash, created_at DESC);
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
@@ -376,6 +404,10 @@ def init_db() -> None:
                 ON recovery_history (timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_recovery_history_recommendation
                 ON recovery_history (recommendation, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_execution_jobs_status
+                ON execution_jobs (status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_execution_jobs_torrent
+                ON execution_jobs (torrent_hash, created_at DESC);
             """
         )
         _migrate_handoff_traces(conn)

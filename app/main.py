@@ -89,6 +89,9 @@ from .responsibility import (
     summarize_assessments,
 )
 from .validation import run_validation
+from .execution_engine.executor import ExecutionEngine
+from .execution_engine.queue import ExecutionQueue
+from .execution_engine.locks import is_locked, lock_holder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,6 +119,7 @@ FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 _config: Config | None = None
 _poll_lock = asyncio.Lock()
 _recovery_agent = RecoveryAgent()
+_execution_engine: ExecutionEngine | None = None
 _database_ready = False
 _startup_error: str | None = None
 _legacy_timeline_cache: dict = {
@@ -128,6 +132,13 @@ _response_refreshing: set[str] = set()
 _response_cache_versions: dict[str, int] = {}
 _priority_two_slots = asyncio.Semaphore(4)
 _priority_three_slots = asyncio.Semaphore(2)
+
+
+def _get_execution_engine() -> ExecutionEngine:
+    global _execution_engine
+    if _execution_engine is None:
+        _execution_engine = ExecutionEngine(get_config())
+    return _execution_engine
 
 
 def _cache_value(key: str) -> object | None:
@@ -197,6 +208,7 @@ def _refresh_response_snapshots() -> None:
             db.all_qbittorrent_torrents()
         ),
         "recovery_agent.status": _recovery_agent_status,
+        "execution_engine.status": _execution_engine_status,
     }
     for key, builder in builders.items():
         try:
@@ -241,6 +253,8 @@ def poll_once() -> dict[str, int]:
             "timeline": 0,
             "cleanup_review_projection": 0,
             "library_projection": 0,
+            "recovery_agent": 0,
+            "execution_engine": 0,
         }
 
     collectors = (
@@ -344,6 +358,12 @@ def poll_once() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Recovery Agent crashed: %s", exc)
         results["recovery_agent"] = 0
+    try:
+        engine = _get_execution_engine()
+        results["execution_engine"] = engine.status()["total_jobs"]
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Execution Engine status failed: %s", exc)
+        results["execution_engine"] = 0
     _refresh_response_snapshots()
     return results
 
@@ -897,6 +917,23 @@ def _torrents_payload() -> dict:
     return response
 
 
+@app.get("/api/torrents/{torrent_hash}")
+async def api_torrent(torrent_hash: str) -> JSONResponse:
+    torrent = torrent_projection.torrent_detail(
+        torrent_hash,
+        db.all_qbittorrent_torrents(),
+        evaluation=recovery.cached_evaluation(torrent_hash),
+    )
+    if torrent is None:
+        return JSONResponse({"error": "torrent not found"}, status_code=404)
+    plan = db.latest_recovery_plans_by_torrent().get(torrent_hash.lower())
+    torrent["agent_evaluated_at"] = (plan or {}).get("created_at")
+    torrent["agent_confidence"] = (plan or {}).get("confidence")
+    torrent["agent_recommendation"] = (plan or {}).get("recommendation")
+    torrent["agent_reasoning"] = (plan or {}).get("reasoning") or []
+    return JSONResponse(torrent)
+
+
 @app.post("/api/torrents/remove-dead")
 async def api_remove_selected_torrents(payload: dict) -> JSONResponse:
     raw_hashes = payload.get("hashes")
@@ -998,23 +1035,6 @@ async def api_torrent_alternatives(
         return JSONResponse({"error": str(exc)}, status_code=502)
     _invalidate_cache("torrents")
     return JSONResponse(evaluation)
-
-
-@app.get("/api/torrents/{torrent_hash}")
-async def api_torrent(torrent_hash: str) -> JSONResponse:
-    torrent = torrent_projection.torrent_detail(
-        torrent_hash,
-        db.all_qbittorrent_torrents(),
-        evaluation=recovery.cached_evaluation(torrent_hash),
-    )
-    if torrent is None:
-        return JSONResponse({"error": "torrent not found"}, status_code=404)
-    plan = db.latest_recovery_plans_by_torrent().get(torrent_hash.lower())
-    torrent["agent_evaluated_at"] = (plan or {}).get("created_at")
-    torrent["agent_confidence"] = (plan or {}).get("confidence")
-    torrent["agent_recommendation"] = (plan or {}).get("recommendation")
-    torrent["agent_reasoning"] = (plan or {}).get("reasoning") or []
-    return JSONResponse(torrent)
 
 
 def _recovery_agent_status() -> dict:
@@ -1172,7 +1192,6 @@ async def api_recovery_history(
             "pagination": {
                 "limit": bounded,
                 "offset": offset,
-                "total": total,
                 "has_more": offset + len(history) < total,
             },
         }
@@ -1218,7 +1237,134 @@ async def api_recovery_queue(
     )
 
 
-# --- Debug inspection endpoints (read-only) -------------------------------
+# --- Execution Engine API ---------------------------------------------------
+
+
+def _execution_engine_status() -> dict:
+    engine = _get_execution_engine()
+    return engine.status()
+
+
+@app.get("/api/execution-engine/status")
+async def api_execution_engine_status() -> JSONResponse:
+    return JSONResponse(
+        await _cached_response("execution_engine.status", _execution_engine_status)
+    )
+
+
+@app.get("/api/execution-engine/jobs")
+async def api_execution_jobs(
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> JSONResponse:
+    engine = _get_execution_engine()
+    jobs, total = await asyncio.to_thread(
+        engine.queue.list_jobs, status, max(1, min(limit, 1000)), max(offset, 0)
+    )
+    return JSONResponse(
+        {
+            "jobs": [j.to_dict() for j in jobs],
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "has_more": offset + len(jobs) < total,
+            },
+        }
+    )
+
+
+@app.get("/api/execution-engine/jobs/{execution_id}")
+async def api_execution_job_detail(execution_id: str) -> JSONResponse:
+    engine = _get_execution_engine()
+    job = await asyncio.to_thread(engine.queue.get_job, execution_id)
+    if not job:
+        return JSONResponse({"error": "execution job not found"}, status_code=404)
+    return JSONResponse(job.to_dict())
+
+
+@app.get("/api/execution-engine/jobs/{execution_id}/timeline")
+async def api_execution_job_timeline(execution_id: str) -> JSONResponse:
+    engine = _get_execution_engine()
+    job = await asyncio.to_thread(engine.queue.get_job, execution_id)
+    if not job:
+        return JSONResponse({"error": "execution job not found"}, status_code=404)
+    return JSONResponse({
+        "execution_id": execution_id,
+        "timeline": [t.to_dict() for t in job.timeline],
+    })
+
+
+@app.post("/api/execution-engine/jobs")
+async def api_execution_submit(payload: dict) -> JSONResponse:
+    """Submit a recovery plan for execution. Creates a Pending job."""
+    plan_id = str(payload.get("plan_id") or "")
+    torrent_hash = str(payload.get("torrent_hash") or "").strip().lower()
+    if not plan_id or not torrent_hash:
+        return JSONResponse(
+            {"error": "plan_id and torrent_hash are required"}, status_code=422
+        )
+    engine = _get_execution_engine()
+    job = await asyncio.to_thread(engine.submit, plan_id, torrent_hash)
+    _invalidate_cache("execution_engine.status")
+    return JSONResponse({"job": job.to_dict()})
+
+
+@app.post("/api/execution-engine/jobs/{execution_id}/approve")
+async def api_execution_approve(execution_id: str) -> JSONResponse:
+    engine = _get_execution_engine()
+    job = await asyncio.to_thread(engine.approve, execution_id)
+    if not job:
+        return JSONResponse(
+            {"error": "execution job not found or not pending"}, status_code=404
+        )
+    _invalidate_cache("execution_engine.status")
+    # Run the job in background — manual mode still requires explicit approval,
+    # but execution happens asynchronously after approval.
+    asyncio.create_task(asyncio.to_thread(engine.run_job, execution_id))
+    return JSONResponse({"job": job.to_dict()})
+
+
+@app.post("/api/execution-engine/jobs/{execution_id}/cancel")
+async def api_execution_cancel(execution_id: str) -> JSONResponse:
+    engine = _get_execution_engine()
+    job = await asyncio.to_thread(engine.cancel, execution_id)
+    if not job:
+        return JSONResponse(
+            {"error": "execution job not found or already terminal"}, status_code=404
+        )
+    _invalidate_cache("execution_engine.status")
+    return JSONResponse({"job": job.to_dict()})
+
+
+@app.post("/api/execution-engine/jobs/{execution_id}/retry")
+async def api_execution_retry(execution_id: str) -> JSONResponse:
+    engine = _get_execution_engine()
+    job = await asyncio.to_thread(engine.retry, execution_id)
+    if not job:
+        return JSONResponse(
+            {"error": "execution job not found or not retryable"}, status_code=404
+        )
+    _invalidate_cache("execution_engine.status")
+    return JSONResponse({"job": job.to_dict()})
+
+
+@app.get("/api/execution-engine/locks")
+async def api_execution_locks() -> JSONResponse:
+    """List currently held torrent locks."""
+    from .execution_engine.locks import _active_locks
+    locks = []
+    for torrent_hash, info in _active_locks.items():
+        locks.append({
+            "torrent_hash": torrent_hash,
+            "execution_id": info["execution_id"],
+            "acquired_at": info["acquired_at"],
+        })
+    return JSONResponse({"locks": locks})
+
+
+# --- Debug inspection endpoints (read-only) ---------------------------------
 # These hit the live service APIs (or recompute correlation from stored events)
 # to expose raw payloads, normalized objects, extraction diagnostics and
 # missing-field warnings. Intended for diagnosing real-world payload mismatches.
@@ -1266,7 +1412,7 @@ async def debug_torrent(torrent_hash: str) -> JSONResponse:
     )
     if result.get("ok"):
         status_code = 200
-    elif "no torrent found" in (result.get("error") or ""):
+    elif "no torrent found" in (result.get("error") or "").lower():
         status_code = 404
     else:
         status_code = 502

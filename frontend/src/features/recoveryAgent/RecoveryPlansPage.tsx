@@ -1,7 +1,8 @@
 import { useDeferredValue, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { getRecoveryPlans } from "@/api/recoveryAgentApi";
+import { submitExecutionJob } from "@/api/executionEngineApi";
 import { ErrorState } from "@/components/ErrorState";
 import { LoadingState } from "@/components/LoadingState";
 import { PageContainer } from "@/components/PageContainer";
@@ -18,12 +19,20 @@ export function RecoveryPlansPage() {
   );
   const [page, setPage] = useState(1);
   const deferredSearch = useDeferredValue(search);
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["recovery-agent", "plans", page, deferredSearch, recommendation, sort],
     queryFn: ({ signal }) => getRecoveryPlans({
       limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE,
       search: deferredSearch, recommendation, sort,
     }, signal),
+  });
+  const submit = useMutation({
+    mutationFn: ({ planId, torrentHash }: { planId: string; torrentHash: string }) =>
+      submitExecutionJob(planId, torrentHash),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["execution-engine"] });
+    },
   });
   const visible = query.data?.plans ?? [];
   const total = query.data?.pagination.total ?? 0;
@@ -45,7 +54,19 @@ export function RecoveryPlansPage() {
           <td className="p-3 font-mono text-meta">{plan.id}</td><td className="p-3">{plan.media_title ?? plan.torrent_hash}</td><td className="p-3 text-text-muted">{plan.media_type ?? "Unknown"}</td>
           <td className="p-3">{String(plan.current_health.status ?? "Unknown")}</td><td className="p-3 font-semibold">{plan.confidence.toFixed(0)}</td><td className="p-3">{plan.recommendation}</td>
           <td className="p-3">{plan.status}</td><td className="p-3">{new Date(plan.created_at).toLocaleString()}</td><td className="p-3">{plan.evaluation_duration_ms} ms</td>
-          <td className="p-3"><Link className="font-semibold text-accent" to={`/recovery-agent/plans/${plan.id}`}>Inspect</Link></td>
+          <td className="p-3">
+            <div className="flex flex-wrap gap-2">
+              <Link className="font-semibold text-accent" to={`/recovery-agent/plans/${plan.id}`}>Inspect</Link>
+              <button
+                type="button"
+                disabled={submit.isPending}
+                onClick={() => submit.mutate({ planId: plan.id, torrentHash: plan.torrent_hash })}
+                className="rounded-md bg-accent px-2 py-1 text-meta font-semibold text-accent-on disabled:opacity-60"
+              >
+                Execute
+              </button>
+            </div>
+          </td>
         </tr>)}</tbody>
       </table></div>}
       <div className="flex items-center justify-between text-body text-text-muted"><span>{total} plans</span><div className="flex gap-2"><button disabled={page === 1} onClick={() => setPage(p => p - 1)} className="rounded-md border border-border px-3 py-1 disabled:opacity-40">Previous</button><span>Page {page}</span><button disabled={!query.data?.pagination.has_more} onClick={() => setPage(p => p + 1)} className="rounded-md border border-border px-3 py-1 disabled:opacity-40">Next</button></div></div>
