@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from . import db, timeline
+from . import db, recovery, timeline
 from . import torrents as torrent_projection
 from .collectors import (
     cleanup as cleanup_collector,
@@ -75,6 +75,7 @@ from .recommendations import (
     summarize_recommendations,
     top_cleanup_candidates,
 )
+from .recovery_agent import RecoveryAgent
 from .responsibility import (
     build_storage_summary,
     run_responsibility,
@@ -107,6 +108,7 @@ FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 # Module-level state, set during startup.
 _config: Config | None = None
 _poll_lock = asyncio.Lock()
+_recovery_agent = RecoveryAgent()
 
 
 def get_config() -> Config:
@@ -227,6 +229,15 @@ def poll_once() -> dict[str, int]:
     except Exception as exc:  # noqa: BLE001
         logger.error("Timeline crashed: %s", exc)
         results["timeline"] = 0
+    try:
+        results["recovery_agent"] = _recovery_agent.tick(
+            config,
+            db.all_qbittorrent_torrents(),
+            db.events_for_torrent,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Recovery Agent crashed: %s", exc)
+        results["recovery_agent"] = 0
     return results
 
 
@@ -648,13 +659,26 @@ async def api_poll_now() -> JSONResponse:
 
 @app.get("/api/torrents")
 async def api_torrents() -> JSONResponse:
-    return JSONResponse(
-        torrent_projection.torrent_response(db.all_qbittorrent_torrents())
-    )
+    torrents = db.all_qbittorrent_torrents()
+    evaluations = {
+        torrent_hash: evaluation
+        for torrent in torrents
+        if (torrent_hash := str(torrent.get("hash") or "").lower())
+        if (evaluation := recovery.cached_evaluation(torrent_hash)) is not None
+    }
+    response = torrent_projection.torrent_response(torrents, evaluations=evaluations)
+    plans = db.latest_recovery_plans_by_torrent()
+    for torrent in response["torrents"]:
+        plan = plans.get(str(torrent.get("hash") or "").lower())
+        torrent["agent_evaluated_at"] = (plan or {}).get("created_at")
+        torrent["agent_confidence"] = (plan or {}).get("confidence")
+        torrent["agent_recommendation"] = (plan or {}).get("recommendation")
+        torrent["agent_reasoning"] = (plan or {}).get("reasoning") or []
+    return JSONResponse(response)
 
 
 @app.post("/api/torrents/remove-dead")
-async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
+async def api_remove_selected_torrents(payload: dict) -> JSONResponse:
     raw_hashes = payload.get("hashes")
     if not isinstance(raw_hashes, list):
         return JSONResponse({"error": "hashes must be a list"}, status_code=422)
@@ -669,22 +693,27 @@ async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
         str(torrent.get("hash") or "").lower(): torrent
         for torrent in db.all_qbittorrent_torrents()
     }
-    invalid = [
-        torrent_hash
-        for torrent_hash in hashes
-        if not current.get(torrent_hash, {}).get("dead_torrent")
-    ]
+    invalid = [torrent_hash for torrent_hash in hashes if torrent_hash not in current]
     if not hashes or invalid:
         return JSONResponse(
             {
-                "error": "only currently detected dead torrents may be removed",
+                "error": "only torrents in the current snapshot may be removed",
                 "invalid_hashes": invalid,
             },
             status_code=400,
         )
 
+    # Preserve the original endpoint's keep-files behavior for older clients.
+    delete_files = payload.get("delete_files", False)
+    if not isinstance(delete_files, bool):
+        return JSONResponse(
+            {"error": "delete_files must be a boolean"}, status_code=422
+        )
     result = await asyncio.to_thread(
-        qbittorrent.delete_torrents, get_config(), hashes, delete_files=False
+        qbittorrent.delete_torrents,
+        get_config(),
+        hashes,
+        delete_files=delete_files,
     )
     if not result.get("ok"):
         return JSONResponse(result, status_code=502)
@@ -694,7 +723,7 @@ async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
             "ok": True,
             "removed": len(hashes),
             "hashes": hashes,
-            "delete_files": False,
+            "delete_files": delete_files,
         }
     )
 
@@ -712,14 +741,122 @@ async def api_retry_dead_torrents(payload: dict) -> JSONResponse:
     )
 
 
-@app.get("/api/torrents/{torrent_hash}")
-async def api_torrent(torrent_hash: str) -> JSONResponse:
-    torrent = torrent_projection.torrent_detail(
-        torrent_hash, db.all_qbittorrent_torrents()
+@app.post("/api/torrents/{torrent_hash}/alternatives")
+async def api_torrent_alternatives(
+    torrent_hash: str, payload: dict | None = None
+) -> JSONResponse:
+    target = torrent_hash.strip().lower()
+    torrent = next(
+        (
+            item
+            for item in db.all_qbittorrent_torrents()
+            if str(item.get("hash") or "").lower() == target
+        ),
+        None,
     )
     if torrent is None:
         return JSONResponse({"error": "torrent not found"}, status_code=404)
+    projected = torrent_projection.enrich_torrent(torrent)
+    if projected["recovery_status"] == "healthy":
+        return JSONResponse(
+            {"error": "healthy torrents do not need alternative evaluation"},
+            status_code=400,
+        )
+    force = (payload or {}).get("force", False)
+    if not isinstance(force, bool):
+        return JSONResponse({"error": "force must be a boolean"}, status_code=422)
+    try:
+        evaluation = await asyncio.to_thread(
+            recovery.evaluate_torrent,
+            get_config(),
+            torrent,
+            db.events_for_torrent(target),
+            force=force,
+        )
+    except recovery.RecoveryProviderError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse(evaluation)
+
+
+@app.get("/api/torrents/{torrent_hash}")
+async def api_torrent(torrent_hash: str) -> JSONResponse:
+    torrent = torrent_projection.torrent_detail(
+        torrent_hash,
+        db.all_qbittorrent_torrents(),
+        evaluation=recovery.cached_evaluation(torrent_hash),
+    )
+    if torrent is None:
+        return JSONResponse({"error": "torrent not found"}, status_code=404)
+    plan = db.latest_recovery_plans_by_torrent().get(torrent_hash.lower())
+    torrent["agent_evaluated_at"] = (plan or {}).get("created_at")
+    torrent["agent_confidence"] = (plan or {}).get("confidence")
+    torrent["agent_recommendation"] = (plan or {}).get("recommendation")
+    torrent["agent_reasoning"] = (plan or {}).get("reasoning") or []
     return JSONResponse(torrent)
+
+
+def _recovery_agent_status() -> dict:
+    config = get_config().section("recovery_agent")
+    settings = db.recovery_agent_settings(
+        default_enabled=bool(config.get("enabled", True)),
+        default_interval=int(config.get("evaluation_interval_minutes", 15)),
+    )
+    jobs = db.recovery_jobs(1000)
+    plans = db.recovery_plans(1000)
+    history = db.recovery_history(1000)
+    confidences = [float(item["confidence"]) for item in history]
+    durations = [float(item["evaluation_duration_ms"]) for item in history]
+    torrents = torrent_projection.torrent_response(db.all_qbittorrent_torrents())
+    return {
+        **settings,
+        "jobs_evaluated": sum(job["status"] == "Completed" for job in jobs),
+        "dead_torrents": torrents["summary"]["dead_torrents"],
+        "plans_generated": len(plans),
+        "average_confidence": round(sum(confidences) / len(confidences), 1)
+        if confidences
+        else 0,
+        "evaluation_duration_ms": round(sum(durations) / len(durations), 1)
+        if durations
+        else 0,
+    }
+
+
+@app.get("/api/recovery-agent/status")
+async def api_recovery_agent_status() -> JSONResponse:
+    return JSONResponse(_recovery_agent_status())
+
+
+@app.patch("/api/recovery-agent/settings")
+async def api_recovery_agent_settings(payload: dict) -> JSONResponse:
+    interval = payload.get("interval_minutes")
+    if interval not in {5, 10, 15, 30, 60}:
+        return JSONResponse({"error": "invalid evaluation interval"}, status_code=422)
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        return JSONResponse({"error": "enabled must be a boolean"}, status_code=422)
+    db.recovery_agent_settings()
+    return JSONResponse(
+        db.update_recovery_agent_settings(
+            enabled=enabled,
+            interval_minutes=interval,
+            next_evaluation_at=None,
+        )
+    )
+
+
+@app.get("/api/recovery-agent/plans")
+async def api_recovery_plans(limit: int = 100) -> JSONResponse:
+    return JSONResponse({"plans": db.recovery_plans(min(max(limit, 1), 1000))})
+
+
+@app.get("/api/recovery-agent/history")
+async def api_recovery_history(limit: int = 100) -> JSONResponse:
+    return JSONResponse({"history": db.recovery_history(min(max(limit, 1), 1000))})
+
+
+@app.get("/api/recovery-agent/queue")
+async def api_recovery_queue(limit: int = 100) -> JSONResponse:
+    return JSONResponse({"jobs": db.recovery_jobs(min(max(limit, 1), 1000))})
 
 
 # --- Debug inspection endpoints (read-only) -------------------------------

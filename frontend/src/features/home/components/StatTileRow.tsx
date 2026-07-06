@@ -59,8 +59,8 @@ function DeadDownloadsTile({
 }: {
   state: StatTileRowProps["torrents"];
 }) {
-  if (state.isLoading) return <TileSkeleton label="Dead Downloads" />;
-  if (state.isError || !state.data) return <TileError label="Dead Downloads" />;
+  if (state.isLoading) return <TileSkeleton label="Recovery Center" />;
+  if (state.isError || !state.data) return <TileError label="Recovery Center" />;
   const count = state.data.summary.dead_torrents;
   return (
     <Link
@@ -68,7 +68,7 @@ function DeadDownloadsTile({
       className="rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
       <StatTile
-        label="Dead Downloads"
+        label="Recovery Center"
         value={String(count)}
         supporting="No seeders available"
       />

@@ -4,6 +4,7 @@ import { IntegrationSettingsCard } from "./components/IntegrationSettingsCard";
 import { CleanupSettingsCard } from "./components/CleanupSettingsCard";
 import { RuntimeSettingsCard } from "./components/RuntimeSettingsCard";
 import { AboutCard } from "./components/AboutCard";
+import { RecoveryAgentSettingsCard } from "./components/RecoveryAgentSettingsCard";
 import { AuditProfiler, useRouteAudit } from "@/perf/audit";
 
 /* Sprint 6 Settings page.
@@ -97,6 +98,7 @@ export function SettingsPage() {
           isError={storage.isError}
         />
       </AuditProfiler>
+      <RecoveryAgentSettingsCard />
 
       <AuditProfiler id="Settings.AboutCard">
         <AboutCard />

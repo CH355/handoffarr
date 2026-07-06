@@ -67,6 +67,21 @@ cleanup_execution:
     - "Exact Library Path Match"
     - "Filename + Size Match"
 
+# Intelligent Recovery performs read-only Arr searches only when requested.
+recovery:
+  cache_seconds: 60
+  weights:
+    availability: 0.35
+    seeders: 0.25
+    quality: 0.20
+    age: 0.10
+    indexer_priority: 0.05
+    custom_format: 0.05
+
+recovery_agent:
+  enabled: true
+  evaluation_interval_minutes: 15
+
 services:
   seerr:
     enabled: true

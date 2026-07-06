@@ -77,6 +77,26 @@ DEFAULTS: dict[str, Any] = {
         "fallback_to_normalized_title": True,
         "title_time_window_minutes": 60,
     },
+    "recovery": {
+        "cache_seconds": 60,
+        "weights": {
+            "availability": 0.35,
+            "seeders": 0.25,
+            "quality": 0.20,
+            "age": 0.10,
+            "indexer_priority": 0.05,
+            "custom_format": 0.05,
+        },
+    },
+    "recovery_agent": {
+        "enabled": True,
+        "evaluation_interval_minutes": 15,
+        "policies": {
+            "availability": 5,
+            "seeders": 3,
+            "health_score": 40,
+        },
+    },
     "services": {},
 }
 

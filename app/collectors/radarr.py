@@ -75,6 +75,9 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
         "downloadId": record.get("downloadId"),
         "indexer": _extract_indexer(record),
         "reported_seeds": _extract_seeds(record),
+        "movie_id": (
+            movie.get("id") if isinstance(movie, dict) else record.get("movieId")
+        ),
         "movie_title": movie_title,
         "torrent_hash": torrent_hash,
     }

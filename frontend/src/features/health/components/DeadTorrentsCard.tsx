@@ -17,7 +17,7 @@ export function DeadTorrentsCard({
   return (
     <section className="flex flex-col gap-4 rounded-lg bg-surface p-5 shadow-elev-1">
       <header className="flex items-center justify-between gap-3">
-        <h3 className="text-subtitle text-text">Dead Torrents</h3>
+        <h3 className="text-subtitle text-text">Recovery Center</h3>
         {health ? (
           <span
             className={`inline-flex items-center gap-1 text-meta font-semibold uppercase ${
@@ -53,7 +53,7 @@ export function DeadTorrentsCard({
               to="/torrents?status=dead"
               className="text-body font-semibold text-accent hover:text-accent-hover"
             >
-              Review Dead Torrents
+              Open Recovery Center
             </Link>
           ) : null}
         </>

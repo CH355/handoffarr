@@ -71,6 +71,7 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
         "source_application": "Radarr",
         "media_type": MEDIA_TYPE,
         "media_id": media_id,
+        "movie_id": media_id,
         "media_title": media_title,
         "source_path": _first(data, PATH_KEYS) or record.get("sourceTitle"),
         "destination_path": _first(data, DESTINATION_KEYS) or _file_path(record),

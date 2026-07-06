@@ -224,6 +224,59 @@ def init_db() -> None:
                 observed_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS recovery_agent_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL,
+                interval_minutes INTEGER NOT NULL,
+                agent_status TEXT NOT NULL,
+                last_evaluation_at TEXT,
+                next_evaluation_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS recovery_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT UNIQUE NOT NULL,
+                torrent_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS recovery_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_id TEXT UNIQUE NOT NULL,
+                job_id TEXT,
+                torrent_hash TEXT NOT NULL,
+                media_id TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_health_json TEXT NOT NULL,
+                recommendation TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                reasoning_json TEXT NOT NULL,
+                replacement_candidates_json TEXT NOT NULL,
+                planned_action TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS recovery_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                history_id TEXT UNIQUE NOT NULL,
+                job_id TEXT,
+                plan_id TEXT,
+                timestamp TEXT NOT NULL,
+                torrent_hash TEXT NOT NULL,
+                health_json TEXT NOT NULL,
+                recommendation TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                selected_candidate_json TEXT,
+                evaluation_duration_ms REAL NOT NULL,
+                candidate_count INTEGER NOT NULL,
+                decision TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_raw_events_source
                 ON raw_events (source, observed_at);
             CREATE INDEX IF NOT EXISTS idx_raw_events_source_type
@@ -264,6 +317,14 @@ def init_db() -> None:
                 ON cleanup_executions (media_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_cleanup_execution_batches_batch
                 ON cleanup_execution_batches (batch_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_recovery_jobs_created
+                ON recovery_jobs (created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_recovery_jobs_status
+                ON recovery_jobs (status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_recovery_plans_torrent
+                ON recovery_plans (torrent_hash, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_recovery_history_timestamp
+                ON recovery_history (timestamp DESC);
             """
         )
         _migrate_handoff_traces(conn)
@@ -970,6 +1031,29 @@ def recent_events(source: str | None = None, limit: int = 200) -> list[dict[str,
     return [dict(r) for r in rows]
 
 
+def events_for_torrent(torrent_hash: str, limit: int = 200) -> list[dict[str, Any]]:
+    """Return stored Arr evidence for one torrent without a time-window cutoff."""
+    target = str(torrent_hash or "").strip().lower()
+    if not target:
+        return []
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM raw_events
+            WHERE source IN ('radarr', 'sonarr')
+              AND (
+                lower(COALESCE(torrent_hash, '')) = ?
+                OR lower(COALESCE(download_id, '')) = ?
+              )
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (target, target, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def events_for_source_since(source: str, since_iso: str) -> list[dict[str, Any]]:
     with _lock, _connect() as conn:
         rows = conn.execute(
@@ -1071,6 +1155,190 @@ def remove_qbittorrent_torrents(torrent_hashes: list[str]) -> None:
             f"WHERE torrent_hash IN ({placeholders})",
             hashes,
         )
+
+
+def recovery_agent_settings(
+    *, default_enabled: bool = True, default_interval: int = 15
+) -> dict[str, Any]:
+    now = _utcnow()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO recovery_agent_settings
+                (id, enabled, interval_minutes, agent_status, updated_at)
+            VALUES (1, ?, ?, 'Idle', ?)
+            """,
+            (1 if default_enabled else 0, default_interval, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM recovery_agent_settings WHERE id = 1"
+        ).fetchone()
+    result = dict(row) if row else {}
+    result["enabled"] = bool(result.get("enabled"))
+    return result
+
+
+def update_recovery_agent_settings(**values: Any) -> dict[str, Any]:
+    allowed = {
+        "enabled",
+        "interval_minutes",
+        "agent_status",
+        "last_evaluation_at",
+        "next_evaluation_at",
+    }
+    updates = {key: value for key, value in values.items() if key in allowed}
+    if not updates:
+        return recovery_agent_settings()
+    if "enabled" in updates:
+        updates["enabled"] = 1 if updates["enabled"] else 0
+    updates["updated_at"] = _utcnow()
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    with _lock, _connect() as conn:
+        conn.execute(
+            f"UPDATE recovery_agent_settings SET {assignments} WHERE id = 1",
+            tuple(updates.values()),
+        )
+    return recovery_agent_settings()
+
+
+def insert_recovery_job(job: dict[str, Any]) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recovery_jobs
+                (job_id, torrent_hash, status, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                job["job_id"],
+                job["torrent_hash"],
+                job["status"],
+                job["created_at"],
+            ),
+        )
+
+
+def update_recovery_job(job_id: str, **values: Any) -> None:
+    allowed = {"status", "started_at", "completed_at", "error"}
+    updates = {key: value for key, value in values.items() if key in allowed}
+    if not updates:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    with _lock, _connect() as conn:
+        conn.execute(
+            f"UPDATE recovery_jobs SET {assignments} WHERE job_id = ?",
+            (*updates.values(), job_id),
+        )
+
+
+def recovery_jobs(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recovery_jobs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_recovery_plan(plan: dict[str, Any]) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recovery_plans
+                (plan_id, job_id, torrent_hash, media_id, created_at, status,
+                 current_health_json, recommendation, confidence, reasoning_json,
+                 replacement_candidates_json, planned_action)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan["id"],
+                plan.get("job_id"),
+                plan["torrent_hash"],
+                plan.get("media_id"),
+                plan["created_at"],
+                plan["status"],
+                json.dumps(plan["current_health"], default=str),
+                plan["recommendation"],
+                plan["confidence"],
+                json.dumps(plan["reasoning"], default=str),
+                json.dumps(plan["replacement_candidates"], default=str),
+                plan["planned_action"],
+            ),
+        )
+
+
+def recovery_plans(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recovery_plans ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    plans = []
+    for row in rows:
+        plan = dict(row)
+        plan["id"] = plan.pop("plan_id")
+        plan["current_health"] = json.loads(
+            plan.pop("current_health_json") or "{}"
+        )
+        plan["reasoning"] = json.loads(plan.pop("reasoning_json") or "[]")
+        plan["replacement_candidates"] = json.loads(
+            plan.pop("replacement_candidates_json") or "[]"
+        )
+        plans.append(plan)
+    return plans
+
+
+def latest_recovery_plans_by_torrent() -> dict[str, dict[str, Any]]:
+    plans = recovery_plans(limit=1000)
+    return {
+        str(plan["torrent_hash"]).lower(): plan
+        for plan in reversed(plans)
+    }
+
+
+def insert_recovery_history(entry: dict[str, Any]) -> None:
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recovery_history
+                (history_id, job_id, plan_id, timestamp, torrent_hash,
+                 health_json, recommendation, confidence,
+                 selected_candidate_json, evaluation_duration_ms,
+                 candidate_count, decision)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry["history_id"],
+                entry.get("job_id"),
+                entry.get("plan_id"),
+                entry["timestamp"],
+                entry["torrent_hash"],
+                json.dumps(entry["health"], default=str),
+                entry["recommendation"],
+                entry["confidence"],
+                json.dumps(entry.get("selected_candidate"), default=str)
+                if entry.get("selected_candidate")
+                else None,
+                entry["evaluation_duration_ms"],
+                entry["candidate_count"],
+                entry["decision"],
+            ),
+        )
+
+
+def recovery_history(limit: int = 100) -> list[dict[str, Any]]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recovery_history ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    entries = []
+    for row in rows:
+        entry = dict(row)
+        entry["health"] = json.loads(entry.pop("health_json") or "{}")
+        raw_candidate = entry.pop("selected_candidate_json")
+        entry["selected_candidate"] = (
+            json.loads(raw_candidate) if raw_candidate else None
+        )
+        entries.append(entry)
+    return entries
 
 
 def replace_traces(traces: list[dict[str, Any]]) -> None:

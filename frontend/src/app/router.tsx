@@ -14,6 +14,7 @@ import { IntegrationDetailPage } from "@/features/health/IntegrationDetailPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { TorrentDetailPage } from "@/features/torrents/TorrentDetailPage";
 import { TorrentsPage } from "@/features/torrents/TorrentsPage";
+import { RecoveryAgentPage } from "@/features/recoveryAgent/RecoveryAgentPage";
 import { AuditProfiler } from "@/perf/audit";
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
@@ -40,6 +41,7 @@ export const router = createBrowserRouter([
         element: <AuditProfiler id="route:Torrents"><TorrentsPage /></AuditProfiler>,
         children: [{ path: ":torrentHash", element: <TorrentDetailPage /> }],
       },
+      { path: "recovery-agent", element: <RecoveryAgentPage /> },
       { path: "health", element: <AuditProfiler id="route:Health"><HealthPage /></AuditProfiler> },
       {
         path: "health/integrations/:integrationId",
