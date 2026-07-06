@@ -15,6 +15,7 @@ class RecoveryEvaluator:
         health = {"status": torrent.get("recovery_status"), "dead": bool(torrent.get("dead_torrent")),
                   "availability_percent": torrent.get("availability_percent"),
                   "seeders": torrent.get("seeders"), "progress": torrent.get("progress"),
+                  "peers": torrent.get("peers"), "state": torrent.get("state"),
                   "health_score": torrent.get("replacement_health_score")}
         decision, alternatives, error = self.policy.evaluate(torrent), None, None
         if decision.evaluate:

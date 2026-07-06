@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 
 from app.recovery_agent.history import RecoveryHistory
+from app.recovery_agent.comparison import compare_plans
 from app.recovery_agent.models import EvaluationResult, PolicyDecision
 from app.recovery_agent.planner import RecoveryPlanner
 from app.recovery_agent.policy import RecoveryPolicyEngine
@@ -89,6 +90,9 @@ class RecoveryAgentComponentTests(TestCase):
         self.assertGreater(plan.confidence, 90)
         self.assertIn("Best replacement has 126 seeders.", plan.reasoning)
         self.assertEqual(plan.status, "Proposed")
+        self.assertEqual(plan.timeline[-1]["type"], "plan_stored")
+        self.assertEqual(sum(item["weight"] for item in plan.confidence_breakdown), 100)
+        self.assertTrue(plan.policy_matches)
 
     def test_history_appends_evaluation_analytics(self):
         repository = Repository()
@@ -103,3 +107,16 @@ class RecoveryAgentComponentTests(TestCase):
         history.record(plan, result)
         self.assertEqual(len(repository.history), 2)
         self.assertEqual(repository.history[0]["evaluation_duration_ms"], 8.5)
+
+    def test_plan_comparison_highlights_decision_changes(self):
+        changes = compare_plans(
+            {"current_health": {"status": "stalled"}, "confidence": 40,
+             "recommendation": "Monitor", "replacement_candidates": [{"score": 30}]},
+            {"current_health": {"status": "dead"}, "confidence": 90,
+             "recommendation": "Replace",
+             "replacement_candidates": [{"score": 88}, {"score": 70}]},
+        )
+        self.assertEqual(changes["health"]["current"], "dead")
+        self.assertEqual(changes["confidence"]["previous"], 40)
+        self.assertEqual(changes["candidate_count"]["current"], 2)
+        self.assertEqual(changes["best_score"]["current"], 88)

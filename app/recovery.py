@@ -71,6 +71,7 @@ class ReplacementCandidate:
             "rejection_reason": self.rejection_reason,
             "score": self.score,
             "recommended": self.recommended,
+            "availability": self.availability,
         }
 
 

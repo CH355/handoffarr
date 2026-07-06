@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -18,6 +18,7 @@ export function TorrentDetailPage() {
   const queryClient = useQueryClient();
   const [candidateSort, setCandidateSort] =
     useState<CandidateSort>("health-score");
+  const [candidateLimit, setCandidateLimit] = useState(100);
   const query = useQuery({
     queryKey: ["torrent", torrentHash],
     queryFn: () => getTorrent(torrentHash),
@@ -47,6 +48,7 @@ export function TorrentDetailPage() {
       ),
     [candidateSort, query.data?.replacement_candidates],
   );
+  useEffect(() => setCandidateLimit(100), [candidateSort, query.data?.replacement_candidates]);
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/30">
@@ -198,7 +200,7 @@ export function TorrentDetailPage() {
                   </thead>
                   <tbody className="divide-y divide-border">
                     {candidates.length ? (
-                      candidates.map((candidate, index) => (
+                      candidates.slice(0, candidateLimit).map((candidate, index) => (
                         <tr
                           key={`${candidate.release_name}:${index}`}
                           className={
@@ -262,6 +264,11 @@ export function TorrentDetailPage() {
                   </tbody>
                 </table>
               </div>
+              {candidateLimit < candidates.length ? (
+                <button type="button" onClick={() => setCandidateLimit(limit => limit + 100)} className="mt-3 rounded-md border border-border px-3 py-2 text-body">
+                  Load next 100
+                </button>
+              ) : null}
               {evaluate.isError ? (
                 <p role="alert" className="mt-3 text-body text-critical">
                   Alternatives could not be evaluated. Confirm this torrent can

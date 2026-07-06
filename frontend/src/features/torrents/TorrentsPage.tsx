@@ -313,6 +313,8 @@ function TorrentBody({
   evaluatingHash: string | null;
   onEvaluate: (hash: string) => void;
 }) {
+  const [rowLimit, setRowLimit] = useState(100);
+  useEffect(() => setRowLimit(100), [torrents]);
   if (isLoading)
     return <LoadingState label="Loading recovery items" rows={6} />;
   if (isError) {
@@ -365,7 +367,7 @@ function TorrentBody({
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {torrents.map((torrent) => (
+          {torrents.slice(0, rowLimit).map((torrent) => (
             <tr
               key={torrent.hash}
               className={selected.has(torrent.hash) ? "bg-accent-quiet/60" : ""}
@@ -467,6 +469,15 @@ function TorrentBody({
           ))}
         </tbody>
       </table>
+      {rowLimit < torrents.length ? (
+        <button
+          type="button"
+          onClick={() => setRowLimit((value) => value + 100)}
+          className="m-4 rounded-md border border-border px-4 py-2 text-body text-text"
+        >
+          Load next 100
+        </button>
+      ) : null}
     </div>
   );
 }
