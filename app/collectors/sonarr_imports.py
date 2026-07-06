@@ -71,11 +71,18 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     if status is None:
         status = "Import Failed"
     media_id, media_title = _media(record)
+    episode = record.get("episode")
+    episode_id = (
+        episode.get("id")
+        if isinstance(episode, dict)
+        else record.get("episodeId")
+    )
     return {
         "import_id": record.get("id"),
         "source_application": "Sonarr",
         "media_type": MEDIA_TYPE,
         "media_id": media_id,
+        "episode_id": episode_id,
         "media_title": media_title,
         "source_path": _first(data, PATH_KEYS) or record.get("sourceTitle"),
         "destination_path": _first(data, DESTINATION_KEYS) or _file_path(record),

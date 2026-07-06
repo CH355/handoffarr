@@ -1,20 +1,31 @@
+import { lazy, Suspense, type ReactNode } from "react";
 import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { HomePage } from "@/features/home/HomePage";
-import { RecoverSpacePage } from "@/features/recover/RecoverSpacePage";
-import { SafeCandidateReviewPage } from "@/features/recover/SafeCandidateReviewPage";
-import { ItemJudgmentPage } from "@/features/recover/ItemJudgmentPage";
-import { PreviewPage } from "@/features/recover/PreviewPage";
-import { CleanupHistoryPage } from "@/features/recover/CleanupHistoryPage";
-import { CleanupBatchDetailPage } from "@/features/recover/CleanupBatchDetailPage";
-import { LibraryPage } from "@/features/library/LibraryPage";
-import { ItemDetailSurface } from "@/features/itemDetail/ItemDetailSurface";
-import { HealthPage } from "@/features/health/HealthPage";
-import { IntegrationDetailPage } from "@/features/health/IntegrationDetailPage";
-import { SettingsPage } from "@/features/settings/SettingsPage";
-import { TorrentDetailPage } from "@/features/torrents/TorrentDetailPage";
-import { TorrentsPage } from "@/features/torrents/TorrentsPage";
 import { AuditProfiler } from "@/perf/audit";
+
+const RecoverSpacePage = lazy(() => import("@/features/recover/RecoverSpacePage").then(module => ({ default: module.RecoverSpacePage })));
+const SafeCandidateReviewPage = lazy(() => import("@/features/recover/SafeCandidateReviewPage").then(module => ({ default: module.SafeCandidateReviewPage })));
+const ItemJudgmentPage = lazy(() => import("@/features/recover/ItemJudgmentPage").then(module => ({ default: module.ItemJudgmentPage })));
+const PreviewPage = lazy(() => import("@/features/recover/PreviewPage").then(module => ({ default: module.PreviewPage })));
+const CleanupHistoryPage = lazy(() => import("@/features/recover/CleanupHistoryPage").then(module => ({ default: module.CleanupHistoryPage })));
+const CleanupBatchDetailPage = lazy(() => import("@/features/recover/CleanupBatchDetailPage").then(module => ({ default: module.CleanupBatchDetailPage })));
+const LibraryPage = lazy(() => import("@/features/library/LibraryPage").then(module => ({ default: module.LibraryPage })));
+const ItemDetailSurface = lazy(() => import("@/features/itemDetail/ItemDetailSurface").then(module => ({ default: module.ItemDetailSurface })));
+const HealthPage = lazy(() => import("@/features/health/HealthPage").then(module => ({ default: module.HealthPage })));
+const IntegrationDetailPage = lazy(() => import("@/features/health/IntegrationDetailPage").then(module => ({ default: module.IntegrationDetailPage })));
+const SettingsPage = lazy(() => import("@/features/settings/SettingsPage").then(module => ({ default: module.SettingsPage })));
+const TorrentDetailPage = lazy(() => import("@/features/torrents/TorrentDetailPage").then(module => ({ default: module.TorrentDetailPage })));
+const TorrentsPage = lazy(() => import("@/features/torrents/TorrentsPage").then(module => ({ default: module.TorrentsPage })));
+const RecoveryAgentPage = lazy(() => import("@/features/recoveryAgent/RecoveryAgentPage").then(module => ({ default: module.RecoveryAgentPage })));
+const RecoveryPlansPage = lazy(() => import("@/features/recoveryAgent/RecoveryPlansPage").then(module => ({ default: module.RecoveryPlansPage })));
+const RecoveryPlanDetailPage = lazy(() => import("@/features/recoveryAgent/RecoveryPlanDetailPage").then(module => ({ default: module.RecoveryPlanDetailPage })));
+const RecoveryHistoryPage = lazy(() => import("@/features/recoveryAgent/RecoveryHistoryPage").then(module => ({ default: module.RecoveryHistoryPage })));
+const RecoveryActivityPage = lazy(() => import("@/features/recoveryAgent/RecoveryActivityPage").then(module => ({ default: module.RecoveryActivityPage })));
+
+function deferred(element: ReactNode) {
+  return <Suspense fallback={<div className="m-6 h-64 animate-pulse rounded-lg bg-surface" aria-label="Loading page" />}>{element}</Suspense>;
+}
 
 /* Route skeletons — frontend-implementation-spec-v1.md §4.
    Sprint 3 adds the Recover Space sub-routes (§4.2). */
@@ -24,28 +35,33 @@ export const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { index: true, element: <AuditProfiler id="route:Home"><HomePage /></AuditProfiler> },
-      { path: "recover", element: <AuditProfiler id="route:Recover"><RecoverSpacePage /></AuditProfiler> },
-      { path: "recover/safe", element: <SafeCandidateReviewPage /> },
-      { path: "recover/judgment", element: <ItemJudgmentPage /> },
-      { path: "recover/preview", element: <PreviewPage /> },
-      { path: "recover/history", element: <CleanupHistoryPage /> },
-      { path: "recover/history/:batchId", element: <CleanupBatchDetailPage /> },
+      { path: "recover", element: deferred(<AuditProfiler id="route:Recover"><RecoverSpacePage /></AuditProfiler>) },
+      { path: "recover/safe", element: deferred(<SafeCandidateReviewPage />) },
+      { path: "recover/judgment", element: deferred(<ItemJudgmentPage />) },
+      { path: "recover/preview", element: deferred(<PreviewPage />) },
+      { path: "recover/history", element: deferred(<CleanupHistoryPage />) },
+      { path: "recover/history/:batchId", element: deferred(<CleanupBatchDetailPage />) },
       {
         path: "library",
-        element: <AuditProfiler id="route:Library"><LibraryPage /></AuditProfiler>,
-        children: [{ path: ":mediaId", element: <AuditProfiler id="route:ItemDetail"><ItemDetailSurface /></AuditProfiler> }],
+        element: deferred(<AuditProfiler id="route:Library"><LibraryPage /></AuditProfiler>),
+        children: [{ path: ":mediaId", element: deferred(<AuditProfiler id="route:ItemDetail"><ItemDetailSurface /></AuditProfiler>) }],
       },
       {
         path: "torrents",
-        element: <AuditProfiler id="route:Torrents"><TorrentsPage /></AuditProfiler>,
-        children: [{ path: ":torrentHash", element: <TorrentDetailPage /> }],
+        element: deferred(<AuditProfiler id="route:Torrents"><TorrentsPage /></AuditProfiler>),
+        children: [{ path: ":torrentHash", element: deferred(<TorrentDetailPage />) }],
       },
-      { path: "health", element: <AuditProfiler id="route:Health"><HealthPage /></AuditProfiler> },
+      { path: "recovery-agent", element: deferred(<RecoveryAgentPage />) },
+      { path: "recovery-agent/plans", element: deferred(<RecoveryPlansPage />) },
+      { path: "recovery-agent/plans/:planId", element: deferred(<RecoveryPlanDetailPage />) },
+      { path: "recovery-agent/history", element: deferred(<RecoveryHistoryPage />) },
+      { path: "recovery-agent/activity", element: deferred(<RecoveryActivityPage />) },
+      { path: "health", element: deferred(<AuditProfiler id="route:Health"><HealthPage /></AuditProfiler>) },
       {
         path: "health/integrations/:integrationId",
-        element: <IntegrationDetailPage />,
+        element: deferred(<IntegrationDetailPage />),
       },
-      { path: "settings", element: <AuditProfiler id="route:Settings"><SettingsPage /></AuditProfiler> },
+      { path: "settings", element: deferred(<AuditProfiler id="route:Settings"><SettingsPage /></AuditProfiler>) },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

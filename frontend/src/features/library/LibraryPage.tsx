@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Outlet } from "react-router-dom";
 import { PageContainer } from "@/components/PageContainer";
 import { LoadingState } from "@/components/LoadingState";
@@ -168,8 +168,22 @@ function Body({
   }
   return (
     <>
+      <WindowedLibraryList items={visibleItems} />
+      <p className="text-meta text-text-muted">
+        Showing {visibleItems.length} of {totalCount}
+      </p>
+    </>
+  );
+}
+
+function WindowedLibraryList({ items }: { items: LibraryItem[] }) {
+  const [limit, setLimit] = useState(100);
+  useEffect(() => setLimit(100), [items]);
+  const rendered = items.slice(0, limit);
+  return (
+    <>
       <ul className="flex flex-col gap-2">
-        {visibleItems.map((item) => (
+        {rendered.map((item) => (
           <li key={item.mediaId || item.title}>
             <AuditProfiler id="Library.LibraryItemRow">
               <LibraryItemRow item={item} />
@@ -177,9 +191,15 @@ function Body({
           </li>
         ))}
       </ul>
-      <p className="text-meta text-text-muted">
-        Showing {visibleItems.length} of {totalCount}
-      </p>
+      {rendered.length < items.length ? (
+        <button
+          type="button"
+          onClick={() => setLimit((value) => value + 100)}
+          className="self-start rounded-md border border-border px-4 py-2 text-body text-text"
+        >
+          Load next 100
+        </button>
+      ) : null}
     </>
   );
 }

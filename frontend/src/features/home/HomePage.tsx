@@ -114,9 +114,10 @@ export function HomePage() {
   );
 
   const bannerLoading =
-    cleanup.isLoading || validation.isLoading || torrents.isLoading;
+    cleanup.isLoading && validation.isLoading && torrents.isLoading;
   const bannerError =
-    cleanup.isError && validation.isError && !cleanup.data && !validation.data;
+    cleanup.isError && validation.isError && torrents.isError &&
+    !cleanup.data && !validation.data && !torrents.data;
 
   return (
     <section

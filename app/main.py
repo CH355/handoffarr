@@ -8,8 +8,13 @@ JSON APIs read the correlated results out of SQLite.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import os
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -19,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from . import db, timeline
+from . import db, recovery, timeline
 from . import torrents as torrent_projection
 from .collectors import (
     cleanup as cleanup_collector,
@@ -75,6 +80,9 @@ from .recommendations import (
     summarize_recommendations,
     top_cleanup_candidates,
 )
+from .perf import timed
+from .recovery_agent import RecoveryAgent
+from .recovery_agent.comparison import compare_plans
 from .responsibility import (
     build_storage_summary,
     run_responsibility,
@@ -107,6 +115,96 @@ FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 # Module-level state, set during startup.
 _config: Config | None = None
 _poll_lock = asyncio.Lock()
+_recovery_agent = RecoveryAgent()
+_database_ready = False
+_startup_error: str | None = None
+_legacy_timeline_cache: dict = {
+    "summary": {},
+    "pipelines": [],
+}
+_response_cache: dict[str, tuple[float, object]] = {}
+_response_cache_lock = threading.Lock()
+_response_refreshing: set[str] = set()
+_response_cache_versions: dict[str, int] = {}
+_priority_two_slots = asyncio.Semaphore(4)
+_priority_three_slots = asyncio.Semaphore(2)
+
+
+def _cache_value(key: str) -> object | None:
+    with _response_cache_lock:
+        entry = _response_cache.get(key)
+    return entry[1] if entry else None
+
+
+def _store_cache_value(
+    key: str, value: object, expected_version: int | None = None
+) -> object:
+    with _response_cache_lock:
+        if (
+            expected_version is not None
+            and _response_cache_versions.get(key, 0) != expected_version
+        ):
+            _response_refreshing.discard(key)
+            return value
+        _response_cache[key] = (time.monotonic(), value)
+        _response_refreshing.discard(key)
+    return value
+
+
+def _invalidate_cache(*keys: str) -> None:
+    with _response_cache_lock:
+        for key in keys:
+            _response_cache.pop(key, None)
+            _response_refreshing.discard(key)
+            _response_cache_versions[key] = _response_cache_versions.get(key, 0) + 1
+
+
+async def _cached_response(key: str, builder, ttl_seconds: int = 60):
+    with _response_cache_lock:
+        entry = _response_cache.get(key)
+        version = _response_cache_versions.get(key, 0)
+        stale = entry is not None and time.monotonic() - entry[0] >= ttl_seconds
+        should_refresh = stale and key not in _response_refreshing
+        if should_refresh:
+            _response_refreshing.add(key)
+    if entry is not None:
+        if should_refresh:
+            async def refresh() -> None:
+                try:
+                    value = await asyncio.to_thread(builder)
+                    _store_cache_value(key, value, version)
+                except Exception:  # noqa: BLE001
+                    with _response_cache_lock:
+                        _response_refreshing.discard(key)
+                    logger.exception("Background response cache refresh failed key=%s", key)
+            asyncio.create_task(refresh())
+        return entry[1]
+    return _store_cache_value(
+        key, await asyncio.to_thread(builder), version
+    )
+
+
+def _refresh_response_snapshots() -> None:
+    """Materialize expensive read models after a poll, outside request paths."""
+    builders = {
+        "storage": lambda: build_storage_summary(get_config()),
+        "imports": lambda: imports_response(db.all_import_events()),
+        "cleanup": lambda: cleanup_response(db.all_cleanup_events()),
+        "validation": _validation_payload,
+        "timeline": lambda: timeline.timeline_response(db.all_timeline_events()),
+        "torrents": _torrents_payload,
+        "health.torrents": lambda: torrent_projection.torrent_response(
+            db.all_qbittorrent_torrents()
+        ),
+        "recovery_agent.status": _recovery_agent_status,
+    }
+    for key, builder in builders.items():
+        try:
+            with _response_cache_lock:
+                version = _response_cache_versions.get(key, 0)
+            _store_cache_value(key, builder(), version)
+        except Exception:  # noqa: BLE001
+            logger.exception("Response snapshot generation failed key=%s", key)
 
 
 def get_config() -> Config:
@@ -145,7 +243,7 @@ def poll_once() -> dict[str, int]:
             "library_projection": 0,
         }
 
-    for name, fn in (
+    collectors = (
         ("seerr", seerr.collect),
         ("radarr", radarr.collect),
         ("sonarr_imports", sonarr_imports.collect),
@@ -153,12 +251,20 @@ def poll_once() -> dict[str, int]:
         ("lidarr_imports", lidarr_imports.collect),
         ("qbittorrent", qbittorrent.collect),
         ("filesystem", filesystem.collect),
-    ):
-        try:
-            results[name] = fn(config)
-        except Exception as exc:  # noqa: BLE001 - one bad service must not kill poll
-            logger.error("Collector %s crashed: %s", name, exc)
-            results[name] = 0
+    )
+    # Connector requests are independent. Their collectors retain their existing
+    # timeouts and database writes remain serialized by the database layer.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="collector") as executor:
+        pending = {
+            executor.submit(fn, config): name for name, fn in collectors
+        }
+        for future in as_completed(pending):
+            name = pending[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Collector %s crashed: %s", name, exc)
+                results[name] = 0
 
     try:
         results["imports"] = run_import_visibility(config)
@@ -224,9 +330,21 @@ def poll_once() -> dict[str, int]:
         results["recommendations"] = 0
     try:
         results["timeline"] = timeline.run_timeline()
+        global _legacy_timeline_cache
+        _legacy_timeline_cache = timeline.build_timeline(db.all_traces())
     except Exception as exc:  # noqa: BLE001
         logger.error("Timeline crashed: %s", exc)
         results["timeline"] = 0
+    try:
+        results["recovery_agent"] = _recovery_agent.tick(
+            config,
+            db.all_qbittorrent_torrents(),
+            db.events_for_torrent,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Recovery Agent crashed: %s", exc)
+        results["recovery_agent"] = 0
+    _refresh_response_snapshots()
     return results
 
 
@@ -239,33 +357,124 @@ async def _poll_loop() -> None:
         await asyncio.sleep(max(5, interval))
 
 
+async def _initialize_runtime() -> None:
+    global _database_ready, _startup_error
+    try:
+        started = time.perf_counter()
+        await asyncio.to_thread(db.init_db)
+        _database_ready = True
+        logger.info(
+            "Startup database initialization completed duration_ms=%.2f",
+            (time.perf_counter() - started) * 1000,
+        )
+        asyncio.create_task(_warm_render_caches())
+        if get_config().is_present:
+            await _poll_loop()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _startup_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("Background runtime initialization failed")
+
+
+async def _warm_render_caches() -> None:
+    global _legacy_timeline_cache
+    try:
+        view, _template = await asyncio.gather(
+            asyncio.to_thread(lambda: timeline.build_timeline(db.all_traces())),
+            asyncio.to_thread(templates.env.get_template, "timeline.html"),
+        )
+        _legacy_timeline_cache = view
+    except Exception:  # noqa: BLE001
+        logger.exception("Non-critical render cache warmup failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init_db()
     config = get_config()
-    if config.is_present:
-        # Kick off an immediate poll, then run the loop in the background.
-        task = asyncio.create_task(_poll_loop())
-    else:
+    task = asyncio.create_task(_initialize_runtime())
+    if not config.is_present:
         logger.warning(
             "Config missing at %s; dashboard will show setup message", config.path
         )
-        task = None
     try:
         yield
     finally:
-        if task is not None:
-            task.cancel()
+        task.cancel()
 
 
 app = FastAPI(title="Handoffarr", lifespan=lifespan)
 
 
+def _request_priority(request: Request) -> int:
+    explicit = request.headers.get("X-Handoffarr-Priority")
+    if explicit in {"1", "2", "3"}:
+        return int(explicit)
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return 1
+    if path.startswith(("/api/health", "/api/imports", "/api/torrents")):
+        return 1
+    if path.startswith(("/api/debug/qbit", "/api/debug/radarr", "/api/debug/seerr")):
+        return 1
+    if path.startswith(("/api/storage", "/api/cleanup", "/api/recovery-agent/queue")):
+        return 2
+    return 3
+
+
+@app.middleware("http")
+async def request_performance_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    priority = _request_priority(request)
+    if (
+        request.url.path.startswith("/api/")
+        and request.url.path != "/api/readiness"
+        and not _database_ready
+    ):
+        response = JSONResponse(
+            {
+                "error": "Handoffarr is initializing",
+                "ready": False,
+                "startup_error": _startup_error,
+            },
+            status_code=503,
+            headers={"Retry-After": "1"},
+        )
+    elif priority == 2:
+        async with _priority_two_slots:
+            response = await call_next(request)
+    elif priority == 3:
+        async with _priority_three_slots:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
+    duration_ms = (time.perf_counter() - started) * 1000
+    response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
+    logger.info(
+        "route method=%s path=%s status=%s priority=%s duration_ms=%.2f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        priority,
+        duration_ms,
+    )
+    return response
+
+
+@app.get("/api/readiness")
+async def api_readiness() -> JSONResponse:
+    return JSONResponse(
+        {"ready": _database_ready, "startup_error": _startup_error},
+        status_code=200 if _database_ready else 503,
+    )
+
+
 @app.get("/api/health")
 async def health() -> JSONResponse:
     config = get_config()
-    torrent_status = torrent_projection.torrent_response(
-        db.all_qbittorrent_torrents()
+    torrent_status = await _cached_response(
+        "health.torrents",
+        lambda: torrent_projection.torrent_response(db.all_qbittorrent_torrents()),
     )
     return JSONResponse(
         {
@@ -280,8 +489,7 @@ async def health() -> JSONResponse:
 @app.get("/timeline", response_class=HTMLResponse)
 async def timeline_view(request: Request) -> HTMLResponse:
     config = get_config()
-    traces = db.all_traces() if config.is_present else []
-    view = timeline.build_timeline(traces)
+    view = _legacy_timeline_cache
     return templates.TemplateResponse(
         "timeline.html",
         {
@@ -296,18 +504,25 @@ async def timeline_view(request: Request) -> HTMLResponse:
 
 @app.get("/api/traces")
 async def api_traces() -> JSONResponse:
-    return JSONResponse({"traces": db.all_traces()})
+    return JSONResponse({"traces": await asyncio.to_thread(db.all_traces)})
 
 
 @app.get("/api/timeline")
 async def api_timeline() -> JSONResponse:
-    return JSONResponse(timeline.timeline_response(db.all_timeline_events()))
+    return JSONResponse(
+        await _cached_response(
+            "timeline",
+            lambda: timeline.timeline_response(db.all_timeline_events()),
+        )
+    )
 
 
 @app.get("/api/timeline/pipelines")
 async def api_timeline_pipelines() -> JSONResponse:
     """Legacy pipeline projection (kept so the existing /timeline HTML page works)."""
-    return JSONResponse(timeline.build_timeline(db.all_traces()))
+    return JSONResponse(
+        await asyncio.to_thread(lambda: timeline.build_timeline(db.all_traces()))
+    )
 
 
 @app.get("/api/timeline/{media_id}")
@@ -324,12 +539,20 @@ async def api_events(source: str | None = None, limit: int = 200) -> JSONRespons
 
 @app.get("/api/storage")
 async def api_storage() -> JSONResponse:
-    return JSONResponse(build_storage_summary(get_config()))
+    return JSONResponse(
+        await _cached_response(
+            "storage", lambda: build_storage_summary(get_config())
+        )
+    )
 
 
 @app.get("/api/imports")
 async def api_imports() -> JSONResponse:
-    return JSONResponse(imports_response(db.all_import_events()))
+    return JSONResponse(
+        await _cached_response(
+            "imports", lambda: imports_response(db.all_import_events())
+        )
+    )
 
 
 @app.get("/api/imports/{media_id}")
@@ -363,7 +586,11 @@ async def api_library_media(media_id: str) -> JSONResponse:
 
 @app.get("/api/cleanup")
 async def api_cleanup() -> JSONResponse:
-    return JSONResponse(cleanup_response(db.all_cleanup_events()))
+    return JSONResponse(
+        await _cached_response(
+            "cleanup", lambda: cleanup_response(db.all_cleanup_events())
+        )
+    )
 
 
 def _cleanup_review_snapshot() -> dict:
@@ -648,13 +875,30 @@ async def api_poll_now() -> JSONResponse:
 
 @app.get("/api/torrents")
 async def api_torrents() -> JSONResponse:
-    return JSONResponse(
-        torrent_projection.torrent_response(db.all_qbittorrent_torrents())
-    )
+    return JSONResponse(await _cached_response("torrents", _torrents_payload))
+
+
+def _torrents_payload() -> dict:
+    torrents = db.all_qbittorrent_torrents()
+    evaluations = {
+        torrent_hash: evaluation
+        for torrent in torrents
+        if (torrent_hash := str(torrent.get("hash") or "").lower())
+        if (evaluation := recovery.cached_evaluation(torrent_hash)) is not None
+    }
+    response = torrent_projection.torrent_response(torrents, evaluations=evaluations)
+    plans = db.latest_recovery_plans_by_torrent()
+    for torrent in response["torrents"]:
+        plan = plans.get(str(torrent.get("hash") or "").lower())
+        torrent["agent_evaluated_at"] = (plan or {}).get("created_at")
+        torrent["agent_confidence"] = (plan or {}).get("confidence")
+        torrent["agent_recommendation"] = (plan or {}).get("recommendation")
+        torrent["agent_reasoning"] = (plan or {}).get("reasoning") or []
+    return response
 
 
 @app.post("/api/torrents/remove-dead")
-async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
+async def api_remove_selected_torrents(payload: dict) -> JSONResponse:
     raw_hashes = payload.get("hashes")
     if not isinstance(raw_hashes, list):
         return JSONResponse({"error": "hashes must be a list"}, status_code=422)
@@ -669,32 +913,38 @@ async def api_remove_dead_torrents(payload: dict) -> JSONResponse:
         str(torrent.get("hash") or "").lower(): torrent
         for torrent in db.all_qbittorrent_torrents()
     }
-    invalid = [
-        torrent_hash
-        for torrent_hash in hashes
-        if not current.get(torrent_hash, {}).get("dead_torrent")
-    ]
+    invalid = [torrent_hash for torrent_hash in hashes if torrent_hash not in current]
     if not hashes or invalid:
         return JSONResponse(
             {
-                "error": "only currently detected dead torrents may be removed",
+                "error": "only torrents in the current snapshot may be removed",
                 "invalid_hashes": invalid,
             },
             status_code=400,
         )
 
+    # Preserve the original endpoint's keep-files behavior for older clients.
+    delete_files = payload.get("delete_files", False)
+    if not isinstance(delete_files, bool):
+        return JSONResponse(
+            {"error": "delete_files must be a boolean"}, status_code=422
+        )
     result = await asyncio.to_thread(
-        qbittorrent.delete_torrents, get_config(), hashes, delete_files=False
+        qbittorrent.delete_torrents,
+        get_config(),
+        hashes,
+        delete_files=delete_files,
     )
     if not result.get("ok"):
         return JSONResponse(result, status_code=502)
     db.remove_qbittorrent_torrents(hashes)
+    _invalidate_cache("torrents", "health.torrents", "recovery_agent.status")
     return JSONResponse(
         {
             "ok": True,
             "removed": len(hashes),
             "hashes": hashes,
-            "delete_files": False,
+            "delete_files": delete_files,
         }
     )
 
@@ -712,14 +962,260 @@ async def api_retry_dead_torrents(payload: dict) -> JSONResponse:
     )
 
 
-@app.get("/api/torrents/{torrent_hash}")
-async def api_torrent(torrent_hash: str) -> JSONResponse:
-    torrent = torrent_projection.torrent_detail(
-        torrent_hash, db.all_qbittorrent_torrents()
+@app.post("/api/torrents/{torrent_hash}/alternatives")
+async def api_torrent_alternatives(
+    torrent_hash: str, payload: dict | None = None
+) -> JSONResponse:
+    target = torrent_hash.strip().lower()
+    torrent = next(
+        (
+            item
+            for item in db.all_qbittorrent_torrents()
+            if str(item.get("hash") or "").lower() == target
+        ),
+        None,
     )
     if torrent is None:
         return JSONResponse({"error": "torrent not found"}, status_code=404)
+    projected = torrent_projection.enrich_torrent(torrent)
+    if projected["recovery_status"] == "healthy":
+        return JSONResponse(
+            {"error": "healthy torrents do not need alternative evaluation"},
+            status_code=400,
+        )
+    force = (payload or {}).get("force", False)
+    if not isinstance(force, bool):
+        return JSONResponse({"error": "force must be a boolean"}, status_code=422)
+    try:
+        evaluation = await asyncio.to_thread(
+            recovery.evaluate_torrent,
+            get_config(),
+            torrent,
+            db.events_for_torrent(target),
+            force=force,
+        )
+    except recovery.RecoveryProviderError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    _invalidate_cache("torrents")
+    return JSONResponse(evaluation)
+
+
+@app.get("/api/torrents/{torrent_hash}")
+async def api_torrent(torrent_hash: str) -> JSONResponse:
+    torrent = torrent_projection.torrent_detail(
+        torrent_hash,
+        db.all_qbittorrent_torrents(),
+        evaluation=recovery.cached_evaluation(torrent_hash),
+    )
+    if torrent is None:
+        return JSONResponse({"error": "torrent not found"}, status_code=404)
+    plan = db.latest_recovery_plans_by_torrent().get(torrent_hash.lower())
+    torrent["agent_evaluated_at"] = (plan or {}).get("created_at")
+    torrent["agent_confidence"] = (plan or {}).get("confidence")
+    torrent["agent_recommendation"] = (plan or {}).get("recommendation")
+    torrent["agent_reasoning"] = (plan or {}).get("reasoning") or []
     return JSONResponse(torrent)
+
+
+def _recovery_agent_status() -> dict:
+    config = get_config().section("recovery_agent")
+    settings = db.recovery_agent_settings(
+        default_enabled=bool(config.get("enabled", True)),
+        default_interval=int(config.get("evaluation_interval_minutes", 15)),
+    )
+    aggregates = db.recovery_agent_aggregates()
+    plans = db.recovery_plans(5)
+    history = db.recovery_history(5)
+    torrents = torrent_projection.torrent_response(db.all_qbittorrent_torrents())
+    return {
+        **settings,
+        "jobs_evaluated": aggregates["queue_counts"]["completed"],
+        "dead_torrents": torrents["summary"]["dead_torrents"],
+        "plans_generated": aggregates["plans_generated"],
+        "average_confidence": aggregates["average_confidence"],
+        "evaluation_duration_ms": aggregates["evaluation_duration_ms"],
+        "queue_counts": aggregates["queue_counts"],
+        "recent_plans": plans[:5],
+        "recent_decisions": history[:5],
+        "recent_errors": aggregates["recent_errors"],
+    }
+
+
+@app.get("/api/recovery-agent/status")
+async def api_recovery_agent_status() -> JSONResponse:
+    return JSONResponse(
+        await _cached_response("recovery_agent.status", _recovery_agent_status)
+    )
+
+
+@app.patch("/api/recovery-agent/settings")
+async def api_recovery_agent_settings(payload: dict) -> JSONResponse:
+    interval = payload.get("interval_minutes")
+    if interval not in {5, 10, 15, 30, 60}:
+        return JSONResponse({"error": "invalid evaluation interval"}, status_code=422)
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        return JSONResponse({"error": "enabled must be a boolean"}, status_code=422)
+    db.recovery_agent_settings()
+    settings = db.update_recovery_agent_settings(
+            enabled=enabled,
+            interval_minutes=interval,
+            next_evaluation_at=None,
+        )
+    _invalidate_cache("recovery_agent.status")
+    return JSONResponse(settings)
+
+
+@app.get("/api/recovery-agent/plans")
+async def api_recovery_plans(
+    limit: int = 100,
+    offset: int = 0,
+    search: str | None = None,
+    recommendation: str | None = None,
+    sort: str = "created",
+) -> JSONResponse:
+    bounded = min(max(limit, 1), 1000)
+    offset = max(offset, 0)
+    plans, total = await asyncio.to_thread(
+        db.recovery_plans_page,
+        bounded,
+        offset,
+        search,
+        recommendation,
+        sort,
+    )
+    return JSONResponse(
+        {
+            "plans": plans,
+            "pagination": {
+                "limit": bounded,
+                "offset": offset,
+                "total": total,
+                "has_more": offset + len(plans) < total,
+            },
+        }
+    )
+
+
+def _recovery_plan(plan_id: str) -> dict | None:
+    return db.recovery_plan(plan_id)
+
+
+@app.get("/api/recovery-agent/plans/{plan_id}")
+async def api_recovery_plan(plan_id: str) -> JSONResponse:
+    plan = await asyncio.to_thread(_recovery_plan, plan_id)
+    if not plan:
+        return JSONResponse({"error": "recovery plan not found"}, status_code=404)
+    return JSONResponse(plan)
+
+
+@app.get("/api/recovery-agent/plans/{plan_id}/comparison")
+async def api_recovery_plan_comparison(plan_id: str) -> JSONResponse:
+    current = await asyncio.to_thread(_recovery_plan, plan_id)
+    if not current:
+        return JSONResponse({"error": "recovery plan not found"}, status_code=404)
+    previous = await asyncio.to_thread(
+        db.previous_recovery_plan,
+        current["torrent_hash"],
+        current["created_at"],
+    )
+    changes = compare_plans(previous, current)
+    return JSONResponse({"previous": previous, "current": current, "changes": changes})
+
+
+@app.get("/api/recovery-agent/plans/{plan_id}/export")
+async def api_recovery_plan_export(plan_id: str) -> JSONResponse:
+    plan = _recovery_plan(plan_id)
+    if not plan:
+        return JSONResponse({"error": "recovery plan not found"}, status_code=404)
+    return JSONResponse(plan, headers={"Content-Disposition": f'attachment; filename="{plan_id}.json"'})
+
+
+@app.get("/api/recovery-agent/plans/{plan_id}/timeline/export")
+async def api_recovery_timeline_export(plan_id: str) -> JSONResponse:
+    plan = _recovery_plan(plan_id)
+    if not plan:
+        return JSONResponse({"error": "recovery plan not found"}, status_code=404)
+    return JSONResponse({"plan_id": plan_id, "timeline": plan["timeline"]},
+                        headers={"Content-Disposition": f'attachment; filename="{plan_id}-timeline.json"'})
+
+
+@app.get("/api/recovery-agent/history")
+async def api_recovery_history(
+    limit: int = 100,
+    offset: int = 0,
+    search: str | None = None,
+    media_type: str | None = None,
+    recommendation: str | None = None,
+    min_confidence: float | None = None,
+    health: str | None = None,
+    date: str | None = None,
+    status: str | None = None,
+) -> JSONResponse:
+    bounded = min(max(limit, 1), 1000)
+    offset = max(offset, 0)
+    history, total = await asyncio.to_thread(
+        db.recovery_history_page,
+        bounded,
+        offset,
+        search,
+        media_type,
+        recommendation,
+        min_confidence,
+        health,
+        date,
+        status,
+    )
+    return JSONResponse(
+        {
+            "history": history,
+            "pagination": {
+                "limit": bounded,
+                "offset": offset,
+                "total": total,
+                "has_more": offset + len(history) < total,
+            },
+        }
+    )
+
+
+@app.get("/api/recovery-agent/history/export")
+async def api_recovery_history_export() -> PlainTextResponse:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["timestamp", "torrent", "health", "recommendation", "confidence",
+                     "selected_candidate", "duration_ms", "candidate_count", "decision"])
+    for entry in db.recovery_history(10000):
+        writer.writerow([
+            entry["timestamp"], entry["torrent_hash"], entry["health"].get("status"),
+            entry["recommendation"], entry["confidence"],
+            (entry.get("selected_candidate") or {}).get("release_name"),
+            entry["evaluation_duration_ms"], entry["candidate_count"], entry["decision"],
+        ])
+    return PlainTextResponse(output.getvalue(), media_type="text/csv",
+                             headers={"Content-Disposition": 'attachment; filename="recovery-history.csv"'})
+
+
+@app.get("/api/recovery-agent/queue")
+async def api_recovery_queue(
+    limit: int = 100, offset: int = 0, status: str | None = None
+) -> JSONResponse:
+    bounded = min(max(limit, 1), 1000)
+    offset = max(offset, 0)
+    jobs, total = await asyncio.to_thread(
+        db.recovery_jobs_page, bounded, offset, status
+    )
+    return JSONResponse(
+        {
+            "jobs": jobs,
+            "pagination": {
+                "limit": bounded,
+                "offset": offset,
+                "total": total,
+                "has_more": offset + len(jobs) < total,
+            },
+        }
+    )
 
 
 # --- Debug inspection endpoints (read-only) -------------------------------
@@ -730,17 +1226,23 @@ async def api_torrent(torrent_hash: str) -> JSONResponse:
 
 @app.get("/api/debug/radarr")
 async def debug_radarr() -> JSONResponse:
-    return JSONResponse(await asyncio.to_thread(radarr.inspect, get_config()))
+    with timed("external_api", service="radarr", route="debug"):
+        result = await asyncio.to_thread(radarr.inspect, get_config())
+    return JSONResponse(result)
 
 
 @app.get("/api/debug/qbit")
 async def debug_qbit() -> JSONResponse:
-    return JSONResponse(await asyncio.to_thread(qbittorrent.inspect, get_config()))
+    with timed("external_api", service="qbittorrent", route="debug"):
+        result = await asyncio.to_thread(qbittorrent.inspect, get_config())
+    return JSONResponse(result)
 
 
 @app.get("/api/debug/seerr")
 async def debug_seerr() -> JSONResponse:
-    return JSONResponse(await asyncio.to_thread(seerr.inspect, get_config()))
+    with timed("external_api", service="seerr", route="debug"):
+        result = await asyncio.to_thread(seerr.inspect, get_config())
+    return JSONResponse(result)
 
 
 @app.get("/api/debug/states")
@@ -804,11 +1306,18 @@ async def debug_imports() -> JSONResponse:
 
 @app.get("/api/validation")
 async def api_validation() -> JSONResponse:
+    result = await _cached_response("validation", _validation_payload)
+    return JSONResponse(result, status_code=200)
+
+
+def _validation_payload() -> dict:
     config = get_config()
-    cleanup_projection = cleanup_review_projection_summary(config)
-    library_projection = library_enriched_projection(config)
-    result = await asyncio.to_thread(
-        run_validation,
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="validation") as executor:
+        cleanup_future = executor.submit(cleanup_review_projection_summary, config)
+        library_future = executor.submit(library_enriched_projection, config)
+        cleanup_projection = cleanup_future.result()
+        library_projection = library_future.result()
+    return run_validation(
         config,
         artifacts=library_projection["artifacts"] or None,
         review_items=None,
@@ -817,8 +1326,6 @@ async def api_validation() -> JSONResponse:
             "library": library_projection["projection"],
         },
     )
-    status_code = 200 if result["status"] != "FAIL" else 200
-    return JSONResponse(result, status_code=status_code)
 
 
 @app.get("/api/debug/export")
